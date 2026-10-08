@@ -14,3 +14,4 @@ pipeline:
 
 settings:
   failFast: false
+  timeoutMs: 300000

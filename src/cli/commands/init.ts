@@ -2,7 +2,7 @@ import { access, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CONFIG_FILE } from '../../config/loader.js';
 
-const TEMPLATE = `version: 1\n\nproject:\n  type: angular\n\npipeline:\n  - install\n  - typecheck\n  - test\n  - coverage\n  - lint\n  - build\n  - security\n\nsettings:\n  failFast: false\n`;
+const TEMPLATE = `version: 1\n\nproject:\n  type: angular\n\npipeline:\n  - install\n  - typecheck\n  - test\n  - coverage\n  - lint\n  - build\n  - security\n\nsettings:\n  failFast: false\n  timeoutMs: 300000\n`;
 
 export async function initCommand(cwd: string, force = false): Promise<void> {
   const path = join(cwd, CONFIG_FILE);
