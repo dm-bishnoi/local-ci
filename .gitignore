@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+.local-ci/reports/
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store

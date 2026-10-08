@@ -1,0 +1,16 @@
+version: 1
+
+project:
+  type: angular
+
+pipeline:
+  - install
+  - typecheck
+  - test
+  - coverage
+  - lint
+  - build
+  - security
+
+settings:
+  failFast: false

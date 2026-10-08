@@ -1,0 +1,42 @@
+{
+  "name": "local-ci",
+  "version": "0.1.0",
+  "description": "Run CI-style validation locally before pushing to CI providers.",
+  "type": "module",
+  "bin": {
+    "local-ci": "dist/cli/index.js"
+  },
+  "files": [
+    "dist",
+    "templates"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev": "tsx src/cli/index.ts",
+    "prepack": "npm run build"
+  },
+  "keywords": ["ci", "local", "pipeline", "cli", "angular", "developer-tools"],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "commander": "^14.0.1",
+    "execa": "^9.6.0",
+    "ora": "^8.2.0",
+    "yaml": "^2.8.1",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/node": "^24.7.2",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
