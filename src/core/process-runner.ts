@@ -118,6 +118,19 @@ function cancelledBeforeStart(command: string, args: readonly string[]): Process
  * exit, a timeout and a cancellation all resolve to a structured
  * {@link ProcessResult} so callers can report them distinctly.
  */
+/**
+ * Injection seam for process execution.
+ *
+ * Adapters and tests can substitute an executor to observe or fake a command
+ * without spawning anything. The default is {@link runProcess}, which is the
+ * only implementation that touches a real child process.
+ */
+export type ProcessExecutor = (
+  executable: string,
+  args: readonly string[],
+  options: RunProcessOptions,
+) => Promise<ProcessResult>;
+
 export async function runProcess(
   executable: string,
   args: readonly string[],

@@ -6,6 +6,92 @@ Run CI-style validation locally before pushing to GitHub or Azure DevOps.
 
 Local CI Runner is an npm CLI with a framework-agnostic core and framework adapters.
 
+## Phase 3 status
+
+Phase 3 adds the **Angular adapter**. The core engine still knows nothing about Angular:
+
+```
+local-ci run
+      ↓
+detect project (angular.json, package.json, lockfile)
+      ↓
+Angular adapter resolves each logical step to a local command
+      ↓
+StepRegistry  ← core only ever sees PipelineStep objects
+      ↓
+Phase 2 engine: PipelineRunner → StepRunner → ProcessRunner → local process
+```
+
+`src/adapters/angular/` is the only Angular-aware code. A React, Vue or Node
+adapter would follow the same shape without touching the engine.
+
+Implemented and verified:
+
+- Angular detection from `angular.json` and Angular packages in `package.json`
+- Deterministic package-manager detection for npm, pnpm and yarn
+- Command mapping for install, typecheck, test, coverage, lint, build and security
+- Steps that run real commands, or report `UNSUPPORTED` with a reason
+- Automatic detection and registration during `local-ci run`
+- Angular adapter test coverage
+
+Azure DevOps, Docker, AI and other frameworks remain out of scope.
+
+## Angular support
+
+### Detection
+
+A project is Angular when `angular.json` exists, or when `package.json` declares
+`@angular/core`, `@angular/cli`, `@angular/build` or `@angular-devkit/build-angular`.
+A TypeScript project with neither is not treated as Angular. If
+`.local-ci.yml` says `project.type: angular` but Angular is not found, the run
+**fails with a diagnostic** instead of executing unrelated commands.
+
+A UTF-8 BOM in `package.json` is tolerated, because Windows editors add one and
+`npm` accepts it.
+
+### Package manager
+
+Resolved from the lockfile, in this fixed order:
+
+| Lockfile | Manager |
+|---|---|
+| `package-lock.json` | npm |
+| `pnpm-lock.yaml` | pnpm |
+| `yarn.lock` | yarn |
+
+With no lockfile, npm is used and the run reports that the choice was a default.
+The adapter never installs or switches package managers, and never falls back
+to a different one: if the detected manager is unavailable the step fails.
+
+### Step mapping
+
+Every mapping is either a real command or an explicit `UNSUPPORTED`. Nothing is
+assumed to exist, and nothing is reported as passing without having run.
+
+| Step | Report name | Resolution |
+|---|---|---|
+| `install` | Dependencies | `npm ci` with a lockfile, otherwise `npm install`; `pnpm install --frozen-lockfile` and `yarn install --frozen-lockfile` with their lockfiles |
+| `typecheck` | TypeScript | `run typecheck` if the script exists, otherwise `UNSUPPORTED` |
+| `test` | Unit Tests | `run test` if the script exists, otherwise `UNSUPPORTED` |
+| `coverage` | Coverage | `run coverage`, else `run test` plus `--coverage` when a coverage provider is declared, otherwise `UNSUPPORTED` |
+| `lint` | Lint | `run lint` if the script exists, otherwise `UNSUPPORTED` |
+| `build` | Production Build | `run build` if the script exists, else the local `ng build` via `npx --no-install` / `pnpm exec` / `yarn exec` |
+| `security` | Security | `npm audit --json` or `pnpm audit --json`; `UNSUPPORTED` for yarn |
+
+Notes:
+
+- A project created by `ng new` ships `build` and `test` scripts but no
+  `typecheck`, `lint` or `coverage` script, so those steps report `UNSUPPORTED`
+  with a reason. Add the scripts to enable them.
+- The Angular CLI fallback uses `npx --no-install`, so it can never fetch a
+  package from a registry. It only applies when `angular.json` exists and
+  `@angular/cli` is declared.
+- Coverage is only forwarded when a real provider is declared. No coverage
+  percentage is ever invented.
+- `install` never modifies `package.json` or updates dependencies. `npm ci` is
+  strict about the lockfile being in sync with `package.json`, which is the
+  desired behaviour for CI.
+
 ## Phase 2 status
 
 Phase 2 delivers the CI execution engine. The core flow is:
@@ -163,8 +249,11 @@ knows nothing about reports, HTML or the log layout.
   look like credentials, and values passed to credential-style flags such as `--token`,
   are replaced with `***`.
 - The environment is never serialized into reports or logs.
-- Secret values are read only to mask them. They are never stored on a result object and
-  never written to disk.
+- A package manager is never installed, switched, or silently replaced
+- `npm audit` contacts the npm registry to check advisories, which is the point
+  of the step; nothing else is uploaded and no telemetry is sent
+- Secret values are read only to mask them. They are never stored on a result
+  object and never written to disk.
 - There is no telemetry, no source upload and no secret collection.
 
 `local-ci doctor` distinguishes a tool that is not installed from one that could not be
@@ -185,7 +274,7 @@ checked because process execution was blocked. It never marks an unchecked tool 
 
 1. CLI foundation — done
 2. CI engine: timeouts, cancellation, logging — done
-3. Angular adapter: dependency checks, typecheck, tests, coverage, lint, build
+3. Angular adapter — done
 4. Console/JSON/HTML reporting expansion
 5. Azure DevOps YAML adapter/importer with explicit unsupported-task results
 

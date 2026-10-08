@@ -1,4 +1,4 @@
-import { runProcess } from './process-runner.js';
+import { runProcess, type ProcessExecutor } from './process-runner.js';
 import { describeCommand } from './redaction.js';
 import type { PipelineContext } from './context.js';
 import type { PipelineStep, StepResult } from './step-runner.js';
@@ -16,6 +16,11 @@ export interface ProcessStepOptions {
   /** Overrides the pipeline-wide timeout for this step. */
   timeoutMs?: number;
   input?: string;
+  /**
+   * Overrides how the process is executed. Defaults to the real executor.
+   * Adapters pass this through so a command can be observed without spawning.
+   */
+  exec?: ProcessExecutor;
 }
 
 /**
@@ -34,7 +39,8 @@ export function createProcessStep(options: ProcessStepOptions): PipelineStep {
     id: options.id,
     name: options.name ?? options.id,
     async run(context: PipelineContext): Promise<StepResult> {
-      const result = await runProcess(options.command, args, {
+      const execute = options.exec ?? runProcess;
+      const result = await execute(options.command, args, {
         cwd: options.cwd ?? context.cwd,
         env: options.env,
         timeoutMs: options.timeoutMs ?? context.config.settings.timeoutMs,
