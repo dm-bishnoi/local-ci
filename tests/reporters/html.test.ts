@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { escapeHtml, renderHtmlReport, writeHtmlReport } from '../../src/reporters/html.js';
 import { makeBuilt, makeStep, withEnv, withTempProject } from '../helpers/reports.js';
@@ -346,7 +347,7 @@ describe('writeHtmlReport', () => {
       const path = await writeHtmlReport(cwd, built.report);
       const html = await readFile(path, 'utf8');
 
-      expect(path).toContain(`.local-ci${'\\'}reports${'\\'}20261008-123456-abcd1234${'\\'}report.html`);
+      expect(path).toBe(join(cwd, '.local-ci', 'reports', '20261008-123456-abcd1234', 'report.html'));
       expect(html).toContain('Local CI Runner');
       assertBalancedMarkup(html);
     });
