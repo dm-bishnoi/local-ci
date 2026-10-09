@@ -1,4 +1,4 @@
-import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { describeReportErrors, writeRunReports } from '../../src/reporters/artifact.js';
@@ -137,12 +137,13 @@ describe('writeRunReports', () => {
   });
 
   it('creates the report tree in a project directory that does not exist yet', async () => {
-    const cwd = join('/nonexistent-project-xyz', 'fresh');
-    const result = await writeRunReports(cwd, makeBuilt([makeStep('build', 'PASS')]));
+    await withTempProject(async (root) => {
+      const cwd = join(root, 'nested', 'fresh');
+      const result = await writeRunReports(cwd, makeBuilt([makeStep('build', 'PASS')]));
 
-    expect(result.errors).toEqual([]);
-    expect(await exists(result.paths.reportJson)).toBe(true);
-    await rm('/nonexistent-project-xyz', { recursive: true, force: true });
+      expect(result.errors).toEqual([]);
+      expect(await exists(result.paths.reportJson)).toBe(true);
+    });
   });
 });
 
