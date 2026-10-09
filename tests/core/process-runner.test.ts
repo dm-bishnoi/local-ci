@@ -46,11 +46,12 @@ describe('runProcess', () => {
   });
 
   it('runs in the requested working directory', async () => {
+    const requestedCwd = process.env['TEMP'] ?? process.env['TMP'] ?? process.cwd();
     const result = await runProcess(...node('process.stdout.write(process.cwd())'), {
-      cwd: process.env['TEMP'] ?? process.env['TMP'] ?? process.cwd(),
+      cwd: requestedCwd,
     });
 
-    expect(result.stdout).toBe(process.env['TEMP'] ?? process.env['TMP']);
+    expect(result.stdout).toBe(requestedCwd);
   });
 
   it('passes environment variables to the child', async () => {
