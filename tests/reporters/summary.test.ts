@@ -92,10 +92,13 @@ describe('buildSummaryReport', () => {
 
 describe('writeSummaryReport', () => {
   it('writes summary.json into the run directory', async () => {
-    const built = makeBuilt([makeStep('build', 'FAIL', { error: 'boom' })]);
-    const path = await writeSummaryReport('/project', built.report);
+    await withTempProject(async (cwd) => {
+      const built = makeBuilt([makeStep('build', 'FAIL', { error: 'boom' })]);
+      const path = await writeSummaryReport(cwd, built.report);
 
-    expect(path).toBe(join('/project', '.local-ci', 'reports', '20261008-123456-abcd1234', 'summary.json'));
+      expect(path).toBe(join(cwd, '.local-ci', 'reports', '20261008-123456-abcd1234', 'summary.json'));
+      expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({ status: 'FAIL', runId: built.report.runId });
+    });
   });
 
   it('produces a file another tool can read without the full report', async () => {

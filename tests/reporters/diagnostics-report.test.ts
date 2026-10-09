@@ -106,7 +106,9 @@ describe('report with preflight and environment', () => {
       expect(html).toContain('BLOCKED');
       expect(html).toContain('DATABASE_URL is required.');
       expect(html).toContain('Environment:');
-      expect(html).toContain('local environment');
+      expect(html).toContain(
+        built.report.environment?.runningInCi ? 'CI environment detected' : 'local environment',
+      );
     });
   });
 
