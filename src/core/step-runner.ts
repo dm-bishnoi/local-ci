@@ -1,7 +1,12 @@
 import type { PipelineContext } from './context.js';
+import { isStepStatus, type StepStatus } from './status.js';
 
-/** Terminal states a step can end in. */
-export type StepStatus = 'PASS' | 'FAIL' | 'UNSUPPORTED' | 'SKIPPED' | 'CANCELLED';
+/**
+ * The canonical vocabulary lives in `status.ts` so that the engine and the
+ * reporting layer cannot drift apart. Re-exported here because callers already
+ * import step types from this module.
+ */
+export { isStepStatus, type StepStatus } from './status.js';
 
 /**
  * Observable lifecycle of a step. `PENDING` and `RUNNING` are transient and are
@@ -48,11 +53,7 @@ export interface StepRunOptions {
   onStart?: (step: PipelineStep) => void;
 }
 
-const TERMINAL_STATUSES: readonly StepStatus[] = ['PASS', 'FAIL', 'UNSUPPORTED', 'SKIPPED', 'CANCELLED'];
-
-export function isStepStatus(value: unknown): value is StepStatus {
-  return typeof value === 'string' && (TERMINAL_STATUSES as readonly string[]).includes(value);
-}
+const TERMINAL_STATUSES: readonly StepStatus[] = ['PASS', 'FAIL', 'UNSUPPORTED', 'SKIPPED', 'CANCELLED', 'BLOCKED', 'ERROR'];
 
 /** Human-readable timeout description, e.g. `30s` or `1500ms`. */
 export function formatTimeout(timeoutMs: number): string {

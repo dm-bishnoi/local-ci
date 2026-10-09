@@ -19,6 +19,16 @@ export interface PipelineRunnerOptions {
   onStepStart?: (step: PipelineStep) => void;
   /** Called as each step finishes, with its structured result. */
   onStepEnd?: (result: StepResult) => void;
+  /**
+   * Steps that preflight determined must not execute, mapped to the reason.
+   *
+   * A blocked step is reported without dispatching anything: the requirement
+   * that prevents execution is known, so attempting the step would only
+   * produce a confusing failure for a reason the tool already understands.
+   * This is the run-side half of the DETECT → SOLVE/GUIDE → VERIFY loop — the
+   * gate lives in the CLI, and the runner simply honours its verdict.
+   */
+  blockedSteps?: ReadonlyMap<string, string>;
 }
 
 export function unsupportedStep(id: string): StepResult {
@@ -36,10 +46,30 @@ export function skippedStep(id: string, reason: string): StepResult {
 }
 
 /**
+ * A step that was never dispatched because a known requirement was missing.
+ *
+ * Distinct from {@link unsupportedStep}: `UNSUPPORTED` means this build cannot
+ * do the job at all, while `BLOCKED` means the job is supported and this machine
+ * is not currently able to do it — a missing tool, an unset required variable,
+ * uninstalled dependencies. Neither is ever a pass.
+ */
+export function blockedStep(id: string, name: string, reason: string): StepResult {
+  return { id, name, status: 'BLOCKED', durationMs: 0, error: reason };
+}
+
+/** A step that could not produce a meaningful verdict because of an internal fault. */
+export function errorStep(id: string, name: string, reason: string): StepResult {
+  return { id, name, status: 'ERROR', durationMs: 0, error: reason };
+}
+
+/**
  * Statuses that make the overall pipeline non-successful.
  *
- * `SKIPPED` is intentionally excluded: skipped steps are a consequence of an
- * earlier failure or of cancellation, and the run is already non-successful.
+ * `SKIPPED` is intentionally excluded from the *list of blocking statuses* but is
+ * still disqualifying here: `isSuccessful` demands that every step is `PASS`, so
+ * a skipped step can never be read as a successful one. Skipping is a
+ * consequence of an earlier failure or of cancellation, and the run is already
+ * non-successful by then.
  */
 export function isSuccessful(status: PipelineStatus, steps: readonly StepResult[]): boolean {
   if (status !== 'PASS') return false;
@@ -98,6 +128,17 @@ export class PipelineRunner {
           continue;
         }
 
+        // A known requirement prevents execution. Checked before failFast so
+        // the real reason is reported instead of a generic "skipped".
+        const blockedReason = this.options.blockedSteps?.get(id);
+        if (blockedReason !== undefined) {
+          const blocked = blockedStep(id, this.registry.get(id)?.name ?? id, blockedReason);
+          steps.push(blocked);
+          failed = true;
+          safeNotify(this.options.onStepEnd, blocked);
+          continue;
+        }
+
         if (failed && context.config.settings.failFast) {
           const skipped = skippedStep(id, 'Skipped because failFast is enabled.');
           steps.push(skipped);
@@ -116,7 +157,10 @@ export class PipelineRunner {
         if (result.status === 'CANCELLED') {
           cancelled = true;
           failed = true;
-        } else if (result.status === 'FAIL' || result.status === 'UNSUPPORTED') {
+        } else if (result.status !== 'PASS') {
+          // FAIL, UNSUPPORTED, BLOCKED and ERROR all mean the run did not
+          // succeed. Only PASS is success, so this stays a single negative test
+          // rather than an enumeration that can fall out of date.
           failed = true;
         }
       }
@@ -127,7 +171,7 @@ export class PipelineRunner {
       const failure: StepResult = {
         id: 'pipeline',
         name: 'pipeline',
-        status: 'FAIL',
+        status: 'ERROR',
         durationMs: 0,
         error: `Unexpected pipeline error: ${error instanceof Error ? error.message : String(error)}`,
       };

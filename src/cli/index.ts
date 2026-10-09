@@ -4,6 +4,7 @@ import { initCommand } from './commands/init.js';
 import { runCommand } from './commands/run.js';
 import { validateCommand } from './commands/validate.js';
 import { doctorCommand } from './commands/doctor.js';
+import { preflightCommand } from './commands/preflight.js';
 import { reportCommand } from './commands/report.js';
 
 const program = new Command();
@@ -29,6 +30,13 @@ program.command('doctor')
     if (code !== 0) process.exitCode = code;
   });
 
+program.command('preflight')
+  .description('Check whether the configured pipeline can reasonably run on this machine')
+  .action(async () => {
+    const code = await preflightCommand(process.cwd());
+    if (code !== 0) process.exitCode = code;
+  });
+
 program.command('run')
   .description('Run the configured local CI pipeline')
   .action(async () => {
@@ -38,8 +46,19 @@ program.command('run')
 
 program.command('report')
   .description('Display a saved report')
-  .argument('<run-id>')
-  .action(async (runId: string) => reportCommand(process.cwd(), runId));
+  // Optional at the parser level so that omitting it produces this command's
+  // own message — usage plus the run ids that actually exist — instead of a
+  // bare commander "missing required argument" error.
+  .argument('[run-id]', 'run id to display, as printed by "local-ci run"')
+  .addHelpText(
+    'after',
+    '\nExamples:\n  local-ci report 20261008-123456-abcd1234\n  local-ci report            # lists available runs\n\n' +
+      'Reports are stored under .local-ci/reports/ in your project, one directory per run.',
+  )
+  .action(async (runId?: string) => {
+    const code = await reportCommand(process.cwd(), runId);
+    if (code !== 0) process.exitCode = code;
+  });
 
 program.command('version')
   .description('Print the local-ci version')

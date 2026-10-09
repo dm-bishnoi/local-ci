@@ -1,89 +1,101 @@
-import { access } from 'node:fs/promises';
-import { join } from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { CONFIG_FILE, loadConfig } from '../../config/loader.js';
+/**
+ * `local-ci doctor` — the command surface for `diagnostics/doctor`.
+ *
+ * Diagnostic only: it never executes a pipeline step, never installs anything
+ * and never modifies the project. Its output is grouped by category, ordered
+ * worst-first inside each group, and ends with a single verdict plus the next
+ * action when there is one.
+ *
+ * Exit code rules (and they are deliberately few):
+ * - `PASS` and `WARNING` → 0. A warning informs; it does not fail a diagnostic.
+ * - `BLOCKED` and `ERROR` → 1. A known blocker, or a check that could not be
+ *   answered, must never look like success to a script.
+ */
 
-const execFileAsync = promisify(execFile);
+import { runDoctorChecks } from '../../diagnostics/doctor.js';
+import type { BrowserSearchResult } from '../../env/browser.js';
+import {
+  buildDiagnosticReport,
+  type Diagnostic,
+  type DiagnosticCategory,
+  type DiagnosticReport,
+} from '../../diagnostics/types.js';
+import { renderDiagnostics, renderRecommendation } from '../../reporters/diagnostics-format.js';
 
-const PROBE_TIMEOUT_MS = 5_000;
-
-type CheckOutcome = 'ok' | 'missing' | 'blocked' | 'invalid';
-
-interface Probe {
-  outcome: CheckOutcome;
-  detail: string;
-}
-
-const ICONS: Record<CheckOutcome, string> = {
-  ok: '✓',
-  missing: '✗',
-  blocked: '!',
-  invalid: '✗',
+const SECTION_TITLES: Record<DiagnosticCategory, string> = {
+  environment: 'ENVIRONMENT',
+  project: 'PROJECT',
+  configuration: 'CONFIGURATION',
+  requirements: 'REQUIREMENTS',
+  pipeline: 'PIPELINE',
 };
 
-/**
- * Distinguishes "tool is not installed" from "we were not allowed to look".
- *
- * Phase 1 collapsed every probe failure to `false`, so a sandbox or permission
- * block was reported as a missing tool. That is a false negative that must
- * never be presented as a definitive answer, and it must never be reported as
- * a pass either.
- */
-async function probeExecutable(name: string): Promise<Probe> {
-  const locator = process.platform === 'win32' ? 'where' : 'which';
-  try {
-    await execFileAsync(locator, [name], { timeout: PROBE_TIMEOUT_MS });
-    return { outcome: 'ok', detail: name };
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
+const SECTION_ORDER: DiagnosticCategory[] = [
+  'environment',
+  'project',
+  'configuration',
+  'requirements',
+  'pipeline',
+];
 
-    // A string code is a spawn-level failure (ENOENT, EPERM, EACCES...), not an
-    // exit status. EPERM/EACCES specifically means the check itself was blocked.
-    if (typeof code === 'string') {
-      const blocked = code === 'EPERM' || code === 'EACCES';
-      return {
-        outcome: 'blocked',
-        detail: blocked
-          ? `${name} could not be checked: process execution was blocked (${code})`
-          : `${name} could not be checked: ${code}`,
-      };
-    }
-
-    const stdout = String((error as { stdout?: unknown }).stdout ?? '').trim();
-    if (stdout) return { outcome: 'ok', detail: name };
-
-    return { outcome: 'missing', detail: `${name} was not found on PATH` };
-  }
+/** Exit code for a diagnostic report. Only PASS and WARNING are zero. */
+export function exitCodeForVerdict(report: DiagnosticReport): number {
+  return report.verdict === 'PASS' || report.verdict === 'WARNING' ? 0 : 1;
 }
 
-export async function doctorCommand(cwd: string): Promise<number> {
-  const checks: Array<[string, CheckOutcome, string]> = [];
-  checks.push([
-    'Node.js',
-    Number(process.versions.node.split('.')[0]) >= 20 ? 'ok' : 'invalid',
-    process.version,
-  ]);
+/**
+ * Renders a diagnostic report as grouped sections plus a verdict line.
+ *
+ * Shared by `doctor` and `preflight` so the two commands cannot drift apart in
+ * how they present the same check.
+ */
+export function formatDiagnosticReport(report: DiagnosticReport): string {
+  const lines: string[] = [];
+  const title = report.command === 'doctor' ? 'LOCAL CI DOCTOR' : 'LOCAL CI PREFLIGHT';
 
-  for (const tool of ['npm', 'git']) {
-    const probe = await probeExecutable(tool);
-    checks.push([tool, probe.outcome, probe.detail]);
+  lines.push(title, '');
+
+  for (const category of SECTION_ORDER) {
+    const diagnostics = report.diagnostics.filter((diagnostic) => diagnostic.category === category);
+    if (diagnostics.length === 0) continue;
+    lines.push(...renderDiagnostics(SECTION_TITLES[category], diagnostics));
   }
 
-  const hasConfig = await access(join(cwd, CONFIG_FILE)).then(() => true).catch(() => false);
-  checks.push([CONFIG_FILE, hasConfig ? 'ok' : 'missing', hasConfig ? CONFIG_FILE : `${CONFIG_FILE} not found`]);
+  const verdictLabel = report.command === 'doctor' ? 'Doctor' : 'Preflight';
+  lines.push(`${verdictLabel}: ${report.verdict}`);
 
-  let configValid = false;
-  try { await loadConfig(cwd); configValid = true; } catch { /* reported below */ }
-  checks.push([
-    'configuration',
-    configValid ? 'ok' : 'invalid',
-    configValid ? 'valid' : `invalid or missing ${CONFIG_FILE}`,
-  ]);
+  // The single most useful next action, when something needs one.
+  const firstRecommendation = report.diagnostics.find(
+    (diagnostic) =>
+      diagnostic.recommendation !== undefined &&
+      (diagnostic.severity === 'ERROR' ||
+        diagnostic.severity === 'BLOCKED' ||
+        diagnostic.severity === 'WARNING' ||
+        diagnostic.severity === 'UNKNOWN'),
+  );
+  if (firstRecommendation?.recommendation) {
+    lines.push(...renderRecommendation(firstRecommendation.recommendation));
+  }
 
-  console.log('\nLOCAL CI DOCTOR\n');
-  for (const [name, outcome, detail] of checks) console.log(`${ICONS[outcome]} ${name}: ${detail}`);
+  return lines.join('\n');
+}
 
-  // Blocked probes are not passes and are not clean results either.
-  return checks.every(([, outcome]) => outcome === 'ok') ? 0 : 1;
+export interface DoctorCommandOptions {
+  /** Skip probes that execute external tools. Used by tests. */
+  skipToolProbes?: boolean;
+  env?: NodeJS.ProcessEnv;
+  /** Browser search override, used by tests. */
+  browsers?: BrowserSearchResult;
+}
+
+export async function doctorCommand(cwd: string, options: DoctorCommandOptions = {}): Promise<number> {
+  const diagnostics: Diagnostic[] = await runDoctorChecks(cwd, {
+    ...(options.skipToolProbes !== undefined ? { skipToolProbes: options.skipToolProbes } : {}),
+    ...(options.env !== undefined ? { env: options.env } : {}),
+    ...(options.browsers !== undefined ? { browsers: options.browsers } : {}),
+  });
+  const report = buildDiagnosticReport('doctor', diagnostics);
+
+  console.log(`\n${formatDiagnosticReport(report)}\n`);
+  return exitCodeForVerdict(report);
 }

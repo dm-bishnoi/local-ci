@@ -1,5 +1,6 @@
 import { execa, type ResultPromise } from 'execa';
 import { redact, sensitiveEnvValues, truncate } from './redaction.js';
+import { DETACHED_CHILD, terminateTree, treeTerminatorFor, type TreeTerminator } from './process-tree.js';
 
 /**
  * Structured outcome of a single child process.
@@ -48,12 +49,24 @@ export interface RunProcessOptions {
   maxBufferBytes?: number;
   /** Maximum characters retained per stream in the result. */
   maxCaptureChars?: number;
+  /** Overrides the process-tree terminator. Tests inject a fake here. */
+  treeTerminator?: TreeTerminator;
+  /** Grace period between the polite and forced tree kill. */
+  forceKillAfterMs?: number;
 }
 
 const DEFAULT_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 const DEFAULT_MAX_CAPTURE_CHARS = 200_000;
-/** Grace period between the termination signal and a forced kill. */
+/** Grace period between the polite and forced tree kill. */
 const FORCE_KILL_DELAY_MS = 2_000;
+/**
+ * Reported as the terminating signal when local-ci itself kills a process tree.
+ *
+ * Windows force-kills with `taskkill /F`, which has no signal name; SIGKILL is
+ * the POSIX term for the same outcome and keeps the field meaningful on every
+ * platform.
+ */
+const FORCED_TERMINATION_SIGNAL = 'SIGKILL';
 
 /**
  * execa's result type is conditional on the `reject` option, which erases the
@@ -145,32 +158,79 @@ export async function runProcess(
   const secrets = [...sensitiveEnvValues(process.env), ...sensitiveEnvValues(options.env)];
 
   const started = performance.now();
+
+  // Termination is managed here rather than delegated to execa. execa's own
+  // timeout and cancel only reach the direct child; a package-manager shim would
+  // leave its own children running, holding the inherited stdio handles open and
+  // keeping this promise alive long after the step was declared over.
+  //
+  // `detached` gives POSIX children their own process group so a single signal
+  // can reach the whole tree.
+  const terminator = options.treeTerminator ?? treeTerminatorFor();
   const child: ResultPromise = execa(executable, [...args], {
     cwd: options.cwd,
     env: options.env,
     input: options.input,
-    timeout: options.timeoutMs,
-    cancelSignal: options.signal,
+    // Rejecting is disabled so every outcome resolves rather than throws.
     reject: false,
     shell: false,
     extendEnv: true,
     cleanup: true,
-    forceKillAfterDelay: FORCE_KILL_DELAY_MS,
+    detached: DETACHED_CHILD,
     maxBuffer: options.maxBufferBytes ?? DEFAULT_MAX_BUFFER_BYTES,
   });
 
-  const raw = (await child) as unknown as RawResult;
+  const pid = child.pid;
+  const stop = new TreeStop();
 
-  const timedOut = raw.timedOut === true;
-  const cancelled = raw.isCanceled === true;
-  const exitCode = toNumberOrNull(raw.exitCode);
-  const signal = toStringOrNull(raw.signal);
-  const failed = raw.failed === true || exitCode === null || exitCode !== 0;
+  let timedOut = false;
+  let cancelled = false;
+
+  const terminate = (): void => {
+    void terminateTree(pid, terminator, options.forceKillAfterMs ?? FORCE_KILL_DELAY_MS);
+  };
+
+  if (options.timeoutMs !== undefined) {
+    const timer = setTimeout(() => {
+      timedOut = true;
+      terminate();
+    }, options.timeoutMs);
+    // A pending timer must never hold the event loop open after the step ended.
+    timer.unref?.();
+    stop.add(() => clearTimeout(timer));
+  }
+
+  const onAbort = (): void => {
+    cancelled = true;
+    terminate();
+  };
+  options.signal?.addEventListener('abort', onAbort, { once: true });
+  stop.add(() => options.signal?.removeEventListener('abort', onAbort));
+
+  let raw: RawResult;
+  try {
+    raw = (await child) as unknown as RawResult;
+  } finally {
+    stop.dispose();
+  }
+
+  // A terminated process has no exit status of its own.
+  //
+  // When *we* terminate the process (timeout or cancellation) the value the OS
+  // reports describes our kill, not the program's intent: a force-killed
+  // Windows process reports exit code 1, which would read as "the tool exited
+  // 1" when in fact it never got to exit. Reporting null alongside the signal
+  // keeps the two facts separate and avoids inventing an exit code.
+  const observedExitCode = toNumberOrNull(raw.exitCode);
+  const observedSignal = toStringOrNull(raw.signal);
+  const terminatedByUs = timedOut || cancelled;
+  const exitCode = terminatedByUs ? null : observedExitCode;
+  const signal = terminatedByUs ? (observedSignal ?? FORCED_TERMINATION_SIGNAL) : observedSignal;
+  const failed = exitCode !== 0;
 
   const result: ProcessResult = {
     command: executable,
     args: [...args],
-    // A signalled process has no exit code. Report null rather than inventing 0.
     exitCode,
     signal,
     stdout: redact(truncate(toText(raw.stdout), maxCaptureChars), secrets),
@@ -182,28 +242,49 @@ export async function runProcess(
   };
 
   if (failed) {
-    // execa's shortMessage echoes the command line, so it is masked and
-    // truncated exactly like captured output.
     result.error = redact(
-      truncate(describeFailure(raw, { timedOut, cancelled, exitCode, signal }), maxCaptureChars),
+      truncate(describeFailure(executable, { timedOut, cancelled, exitCode, signal }), maxCaptureChars),
       secrets,
     );
-    const code = toStringOrNull(raw.code);
+    const code = toStringOrNull((raw as RawResult).code);
     if (code) result.errorCode = code;
   }
 
   return result;
 }
 
+/** Runs cleanup callbacks exactly once, in reverse registration order. */
+class TreeStop {
+  private actions: Array<() => void> = [];
+  private done = false;
+
+  add(action: () => void): void {
+    this.actions.push(action);
+  }
+
+  dispose(): void {
+    if (this.done) return;
+    this.done = true;
+    for (const action of this.actions.reverse()) {
+      try {
+        action();
+      } catch {
+        /* cleanup must never mask the original result */
+      }
+    }
+    this.actions = [];
+  }
+}
+
 function describeFailure(
-  raw: RawResult,
+  executable: string,
   info: { timedOut: boolean; cancelled: boolean; exitCode: number | null; signal: string | null },
 ): string {
-  const short = toStringOrNull(raw.shortMessage) ?? toStringOrNull(raw.message);
-
-  if (info.timedOut) return short ?? 'Process timed out and was terminated.';
-  if (info.cancelled) return short ?? 'Process was cancelled and terminated.';
-  if (short) return short;
+  // The message is composed here rather than taken from execa's `shortMessage`,
+  // because termination is now driven by this module rather than by execa and
+  // execa no longer knows why the process ended.
+  if (info.timedOut) return `Step timed out and "${executable}" was terminated.`;
+  if (info.cancelled) return `Execution was cancelled and "${executable}" was terminated.`;
   if (info.signal !== null) return `Process was terminated by ${info.signal}.`;
   if (info.exitCode !== null) return `Process exited with code ${info.exitCode}.`;
   return 'Process failed to run.';

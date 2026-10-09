@@ -1,11 +1,22 @@
-import { mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import type { PipelineRunResult } from '../core/pipeline-runner.js';
+/**
+ * `report.json` — the complete, machine-readable record of a run.
+ *
+ * Serializes the {@link RunReport} verbatim. Because the model already bounds
+ * every excerpt and masks every string, there is no second sanitising pass here
+ * that could disagree with the one the HTML and log reporters see.
+ */
 
-export async function writeJsonReport(cwd: string, result: PipelineRunResult): Promise<string> {
-  const dir = join(cwd, '.local-ci', 'reports', result.runId);
-  await mkdir(dir, { recursive: true });
-  const path = join(dir, 'report.json');
-  await writeFile(path, `${JSON.stringify(result, null, 2)}\n`, 'utf8');
+import { mkdir, writeFile } from 'node:fs/promises';
+import type { RunReport } from './report-model.js';
+import { reportJsonPath, runReportDir } from './paths.js';
+
+export function serializeReport(report: RunReport): string {
+  return `${JSON.stringify(report, null, 2)}\n`;
+}
+
+export async function writeJsonReport(cwd: string, report: RunReport): Promise<string> {
+  await mkdir(runReportDir(cwd, report.runId), { recursive: true });
+  const path = reportJsonPath(cwd, report.runId);
+  await writeFile(path, serializeReport(report), 'utf8');
   return path;
 }
