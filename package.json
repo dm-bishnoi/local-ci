@@ -1,7 +1,7 @@
 {
   "name": "@dm-bishnoi/local-ci-runner",
-  "version": "0.1.0",
-  "description": "Run CI-style validation locally before pushing to CI providers.",
+  "version": "0.1.1",
+  "description": "Run Angular CI checks locally before pushing, with preflight diagnostics and console, JSON, and HTML reports.",
   "type": "module",
   "bin": {
     "local-ci-runner": "dist/cli/index.js"
@@ -21,7 +21,22 @@
     "dev": "tsx src/cli/index.ts",
     "prepack": "npm run build"
   },
-  "keywords": ["ci", "local", "pipeline", "cli", "angular", "developer-tools"],
+  "keywords": [
+    "local-ci",
+    "local-ci-runner",
+    "ci",
+    "continuous-integration",
+    "pipeline",
+    "ci-pipeline",
+    "build-validation",
+    "preflight",
+    "developer-tools",
+    "cli",
+    "angular",
+    "test-automation",
+    "process-management",
+    "reporting"
+  ],
   "license": "MIT",
   "publishConfig": {
     "access": "public"
@@ -38,5 +53,14 @@
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"
+  },
+  "author": "Dharmender Bishnoi",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dm-bishnoi/local-ci.git"
+  },
+  "homepage": "https://github.com/dm-bishnoi/local-ci#readme",
+  "bugs": {
+    "url": "https://github.com/dm-bishnoi/local-ci/issues"
   }
 }

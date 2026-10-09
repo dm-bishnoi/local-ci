@@ -1,10 +1,12 @@
 # Local CI Runner
 
-Run CI-style validation locally before pushing to GitHub or Azure DevOps.
+Run configured Angular CI checks locally before pushing, with preflight diagnostics and console, JSON, and HTML reports.
 
 > `npx @dm-bishnoi/local-ci-runner run`
 
 Local CI Runner is an npm CLI with a framework-agnostic core and framework adapters.
+
+**Current support:** the built-in project adapter targets Angular. Generic Node.js/pnpm project detection and GitHub Actions YAML execution are not included in version 0.1.x.
 
 ## Phase 4.5 status
 
