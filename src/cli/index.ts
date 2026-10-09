@@ -12,7 +12,7 @@ const program = new Command();
 program
   .name('local-ci-runner')
   .description('Run CI-style validation locally before pushing to CI providers.')
-  .version('0.1.0');
+  .version('0.1.1');
 
 program.command('init')
   .description('Create a .local-ci.yml configuration')
@@ -62,7 +62,7 @@ program.command('report')
 
 program.command('version')
   .description('Print the local-ci-runner version')
-  .action(() => console.log('0.1.0'));
+  .action(() => console.log('0.1.1'));
 
 program.parseAsync().catch((error: unknown) => {
   console.error(`local-ci-runner: ${error instanceof Error ? error.message : String(error)}`);
