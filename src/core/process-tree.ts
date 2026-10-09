@@ -26,7 +26,7 @@
 
 import { execFile } from 'node:child_process';
 
-export type TreeSignal = 'TERM' | 'KILL';
+export type TreeSignal = 'TERM' | 'KILL' | 'SIGTERM' | 'SIGKILL';
 
 export interface TreeTerminator {
   /** Terminates the tree rooted at `pid`. Never throws. */
@@ -35,6 +35,11 @@ export interface TreeTerminator {
   readonly canKillTree: boolean;
   /** Short human-readable description of the mechanism, for diagnostics. */
   readonly description: string;
+}
+
+/** Converts TreeSignal shorthand ('TERM' / 'KILL') to Node-compatible POSIX signal strings. */
+function toPosixSignal(signal: TreeSignal): 'SIGTERM' | 'SIGKILL' {
+  return signal === 'KILL' || signal === 'SIGKILL' ? 'SIGKILL' : 'SIGTERM';
 }
 
 /**
@@ -75,16 +80,17 @@ const posixTerminator: TreeTerminator = {
   canKillTree: true,
   description: 'process group signal (POSIX process group)',
   kill(pid: number, signal: TreeSignal = 'TERM'): Promise<boolean> {
+    const posixSignal = toPosixSignal(signal);
     return new Promise((resolve) => {
       try {
         // Negative pid addresses the process group whose id is |pid|.
-        process.kill(-pid, signal);
+        process.kill(-pid, posixSignal);
         resolve(true);
       } catch {
         // ESRCH means it is already gone. Fall back to the direct child, which
         // covers the case where `detached` did not take effect.
         try {
-          process.kill(pid, signal);
+          process.kill(pid, posixSignal);
           resolve(true);
         } catch {
           resolve(false);
