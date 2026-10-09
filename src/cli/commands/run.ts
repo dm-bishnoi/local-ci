@@ -217,7 +217,7 @@ export async function runCommand(cwd: string, options: RunCommandOptions = {}): 
         error:
           blockers.length > 0
             ? describeBlockers(blockers)
-            : `No usable ${CONFIG_FILE} was found. Run "local-ci init" to create one.`,
+            : `No usable ${CONFIG_FILE} was found. Run "local-ci-runner init" to create one.`,
       },
     ]);
     return reportRun(cwd, result, metadata, gate);
@@ -256,7 +256,7 @@ export async function runCommand(cwd: string, options: RunCommandOptions = {}): 
   // One cancellation object per invocation, always disposed, so repeated
   // commands never accumulate SIGINT/SIGTERM listeners.
   const cancellation = createRunCancellation((reason) => {
-    console.error(`\nlocal-ci: ${reason} Cancelling run...`);
+    console.error(`\nlocal-ci-runner: ${reason} Cancelling run...`);
   });
 
   let result: PipelineRunResult;

@@ -51,7 +51,7 @@ export function isSafeRunId(runId: unknown): runId is string {
 /** Validates a run id, throwing a message meant to be shown to a user. */
 export function assertSafeRunId(runId: unknown): string {
   if (typeof runId !== 'string' || runId.trim() === '') {
-    throw new ReportPathError('A run id is required. Usage: local-ci report <run-id>');
+    throw new ReportPathError('A run id is required. Usage: local-ci-runner report <run-id>');
   }
   if (!isSafeRunId(runId)) {
     throw new ReportPathError(

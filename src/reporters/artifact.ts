@@ -100,5 +100,5 @@ export async function writeRunReports(cwd: string, built: BuiltReport): Promise<
 /** Human-readable summary of a partial or total write failure. */
 export function describeReportErrors(errors: readonly ArtifactError[]): string {
   const lines = errors.map((error) => `  - ${error.artifact}: ${error.message}`);
-  return `local-ci could not write ${errors.length} report artifact(s):\n${lines.join('\n')}`;
+  return `local-ci-runner could not write ${errors.length} report artifact(s):\n${lines.join('\n')}`;
 }

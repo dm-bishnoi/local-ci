@@ -69,7 +69,7 @@ describe('reportCommand', () => {
       const code = await reportCommand(cwd);
 
       expect(code).toBe(1);
-      expect(stderr()).toContain('Usage: local-ci report <run-id>');
+      expect(stderr()).toContain('Usage: local-ci-runner report <run-id>');
       expect(stdout()).not.toContain('LOCAL CI REPORT');
     });
   });
@@ -100,7 +100,7 @@ describe('reportCommand', () => {
       const code = await reportCommand(cwd, RUN_ID);
 
       expect(code).toBe(1);
-      expect(stderr()).toContain('Run "local-ci run" first');
+      expect(stderr()).toContain('Run "local-ci-runner run" first');
     });
   });
 

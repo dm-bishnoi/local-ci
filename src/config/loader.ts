@@ -21,7 +21,7 @@ export async function loadConfig(cwd: string): Promise<LocalCiConfig> {
   } catch (error) {
     const code = error instanceof Error && 'code' in error ? error.code : undefined;
     if (code === 'ENOENT') {
-      throw new ConfigError(`Missing ${CONFIG_FILE}. Run "local-ci init" first.`);
+      throw new ConfigError(`Missing ${CONFIG_FILE}. Run "local-ci-runner init" first.`);
     }
     throw new ConfigError(`Unable to read ${CONFIG_FILE}: ${error instanceof Error ? error.message : String(error)}`);
   }

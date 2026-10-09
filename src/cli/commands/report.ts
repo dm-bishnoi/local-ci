@@ -1,5 +1,5 @@
 /**
- * `local-ci report <run-id>` — reopens a stored run.
+ * `local-ci-runner report <run-id>` — reopens a stored run.
  *
  * A stored report is data this process did not write, and the run id is a
  * user-supplied string on its way into a filesystem path. Both are treated as
@@ -32,7 +32,7 @@ async function printAvailableRuns(cwd: string, headline?: string): Promise<void>
 
   const runIds = await listRunIds(cwd);
   if (runIds.length === 0) {
-    console.error('\nNo stored reports were found. Run "local-ci run" first.');
+    console.error('\nNo stored reports were found. Run "local-ci-runner run" first.');
     return;
   }
 
@@ -43,7 +43,7 @@ async function printAvailableRuns(cwd: string, headline?: string): Promise<void>
 
 export async function reportCommand(cwd: string, runId?: string): Promise<number> {
   if (!runId || runId.trim() === '') {
-    console.error('Usage: local-ci report <run-id>');
+    console.error('Usage: local-ci-runner report <run-id>');
     await printAvailableRuns(cwd, 'No run id was supplied.');
     return 1;
   }

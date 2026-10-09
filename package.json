@@ -1,10 +1,10 @@
 {
-  "name": "local-ci",
+  "name": "@dm-bishnoi/local-ci-runner",
   "version": "0.1.0",
   "description": "Run CI-style validation locally before pushing to CI providers.",
   "type": "module",
   "bin": {
-    "local-ci": "dist/cli/index.js"
+    "local-ci-runner": "dist/cli/index.js"
   },
   "files": [
     "dist",

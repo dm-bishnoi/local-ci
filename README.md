@@ -2,7 +2,7 @@
 
 Run CI-style validation locally before pushing to GitHub or Azure DevOps.
 
-> `npx local-ci run`
+> `npx @dm-bishnoi/local-ci-runner run`
 
 Local CI Runner is an npm CLI with a framework-agnostic core and framework adapters.
 
@@ -19,7 +19,7 @@ could not be verified is reported as unverified, never as a pass, and a blocked 
 unsupported condition is never converted into `PASS`.
 
 ```
-local-ci preflight
+local-ci-runner preflight
       ↓
 blocking condition?
       ├─ yes → report BLOCKED → do not execute the affected steps
@@ -28,12 +28,12 @@ blocking condition?
 
 New commands:
 
-- `local-ci doctor` — diagnostic only. Audits the environment, the project and the
+- `local-ci-runner doctor` — diagnostic only. Audits the environment, the project and the
   configuration. It never executes a pipeline step, never installs anything and never
   modifies the project.
-- `local-ci preflight` — "can this configured pipeline reasonably run here?" Runs the
-  same checks that gate `local-ci run`, for a human.
-- `local-ci run` — now runs preflight first. Blocking conditions prevent the affected
+- `local-ci-runner preflight` — "can this configured pipeline reasonably run here?" Runs the
+  same checks that gate `local-ci-runner run`, for a human.
+- `local-ci-runner run` — now runs preflight first. Blocking conditions prevent the affected
   steps from executing and are reported as `BLOCKED`; warnings inform but never block.
 
 Each run's report now also carries an **environment fingerprint** (OS, architecture,
@@ -46,7 +46,7 @@ Phase 4 delivers the **reporting layer**. Every run — successful, failed, time
 out, cancelled or unsupported — produces a complete, durable set of artifacts:
 
 ```
-local-ci run
+local-ci-runner run
       ↓
 PipelineRunner          collected StepResults
       ↓
@@ -74,7 +74,7 @@ Implemented and verified:
 - Coverage read from a real Istanbul summary, or reported honestly as missing
 - Redaction of environment secrets, credential flags and URL-embedded passwords
 - Reporting failures isolated: a broken artifact never destroys the run result
-- `local-ci report <run-id>`, with safe run-id handling and readable errors
+- `local-ci-runner report <run-id>`, with safe run-id handling and readable errors
 
 Azure DevOps, Docker, AI and other frameworks remain out of scope.
 
@@ -84,7 +84,7 @@ The core engine knows nothing about Angular. All Angular awareness lives in
 `src/adapters/angular/`:
 
 ```
-local-ci run
+local-ci-runner run
       ↓
 detect project (angular.json, package.json, lockfile)
       ↓
@@ -189,13 +189,13 @@ npm run build
 npm link
 
 cd /path/to/your/project
-local-ci init
-local-ci validate
-local-ci doctor
-local-ci preflight
-local-ci run
+local-ci-runner init
+local-ci-runner validate
+local-ci-runner doctor
+local-ci-runner preflight
+local-ci-runner run
 
-local-ci report <run-id>   # reopen a stored run
+local-ci-runner report <run-id>   # reopen a stored run
 ```
 
 `doctor` diagnoses the machine and the project. `preflight` answers the one question
@@ -205,8 +205,8 @@ before executing anything.
 The package can also be invoked after publishing with:
 
 ```bash
-npx local-ci init
-npx local-ci run
+npx @dm-bishnoi/local-ci-runner init
+npx @dm-bishnoi/local-ci-runner run
 ```
 
 ## Configuration
@@ -275,7 +275,7 @@ never reported as a pass.
 
 ## Cancellation
 
-Pressing Ctrl+C (SIGINT) during `local-ci run`:
+Pressing Ctrl+C (SIGINT) during `local-ci-runner run`:
 
 1. aborts the pipeline through an `AbortController`,
 2. terminates the running child process **and its process tree** (see
@@ -306,7 +306,7 @@ or cancellation.
 ## Doctor
 
 ```bash
-local-ci doctor
+local-ci-runner doctor
 ```
 
 Doctor is **diagnostic only** — it never executes the pipeline. It checks:
@@ -327,7 +327,7 @@ Every check is reported as one of:
 | `PASS` | Verified good — the check actually ran and the answer is yes. |
 | `WARNING` | Off but workable; the pipeline can still run. |
 | `BLOCKED` | A known requirement prevents execution. |
-| `UNSUPPORTED` | local-ci cannot perform this capability. |
+| `UNSUPPORTED` | local-ci-runner cannot perform this capability. |
 | `ERROR` | The check itself failed; the answer is genuinely unknown. |
 | `UNKNOWN` | Deliberately unverified — reported, never promoted to `PASS`. |
 
@@ -337,7 +337,7 @@ A requirement that could not actually be verified is reported as `UNKNOWN` or
 ## Preflight
 
 ```bash
-local-ci preflight
+local-ci-runner preflight
 ```
 
 Preflight answers: "Can this configured pipeline reasonably run on this machine?"
@@ -558,7 +558,7 @@ a log for a step that never executed would be fabricated evidence.
 ### Reading a report back
 
 ```bash
-local-ci report 20261008-123456-abcd1234
+local-ci-runner report 20261008-123456-abcd1234
 ```
 
 Prints the stored run's console report. Run the command with no argument to list
@@ -604,7 +604,7 @@ never reported as `0%`.
 | `PASS` | The step completed successfully. | yes |
 | `FAIL` | The step failed, threw, or timed out (`timedOut: true`). | yes |
 | `BLOCKED` | A known requirement (tool, variable, capability) prevented execution. | no |
-| `UNSUPPORTED` | local-ci cannot execute this capability. Nothing ran. | no |
+| `UNSUPPORTED` | local-ci-runner cannot execute this capability. Nothing ran. | no |
 | `SKIPPED` | Not run, because of `failFast` or cancellation. | no |
 | `CANCELLED` | Interrupted by cancellation (Ctrl+C). | yes |
 | `ERROR` | An unexpected internal/system error prevented a meaningful verdict. | no |
@@ -656,7 +656,7 @@ that states plainly that they did not run.
   object and never written to disk.
 - There is no telemetry, no source upload and no secret collection.
 
-`local-ci doctor` distinguishes a tool that is not installed from one that could not be
+`local-ci-runner doctor` distinguishes a tool that is not installed from one that could not be
 checked because process execution was blocked. It never marks an unchecked tool as a pass.
 
 ## Architecture notes
@@ -682,8 +682,8 @@ checked because process execution was blocked. It never marks an unchecked tool 
   verdict derivation and blocker scoping. Only `BLOCKED` and `ERROR` block execution.
 - `src/diagnostics/facts.ts` — read-only observations about the project on disk.
   Observations, not verdicts; doctor and preflight decide what they mean.
-- `src/diagnostics/doctor.ts`, `preflight.ts` — the check sets behind `local-ci doctor`
-  and `local-ci preflight`, and the gate `run` consults before executing.
+- `src/diagnostics/doctor.ts`, `preflight.ts` — the check sets behind `local-ci-runner doctor`
+  and `local-ci-runner preflight`, and the gate `run` consults before executing.
 - `src/env/fingerprint.ts` — the environment fingerprint. Structured so no field can
   carry a secret.
 - `src/env/semver.ts` — deliberately small range checker; unresolvable ranges are

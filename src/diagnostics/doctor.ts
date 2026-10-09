@@ -85,7 +85,7 @@ function environmentDiagnostics(probe: typeof probeTool): Promise<Diagnostic[]> 
         severity: 'UNKNOWN',
         category: 'environment',
         detail: git.detail,
-        recommendation: 'Git is optional for local-ci but common in CI. It was not checked here.',
+        recommendation: 'Git is optional for local-ci-runner but common in CI. It was not checked here.',
       });
     } else {
       diagnostics.push({
@@ -148,7 +148,7 @@ function runtimeDiagnostic(facts: ProjectFacts): Diagnostic {
     severity: 'UNKNOWN',
     category: 'environment',
     detail: `Node ${process.versions.node} is running. ${declared} is declared but could not be evaluated: ${result.reason ?? 'unsupported range syntax'}.`,
-    recommendation: `Verify manually that Node ${process.versions.node} satisfies ${declared}. local-ci does not claim compatibility it could not check.`,
+    recommendation: `Verify manually that Node ${process.versions.node} satisfies ${declared}. local-ci-runner does not claim compatibility it could not check.`,
   };
 }
 
@@ -232,7 +232,7 @@ function projectDiagnostics(facts: ProjectFacts): Diagnostic[] {
           severity: 'BLOCKED',
           category: 'project',
           detail: 'No package.json was found in this directory.',
-          recommendation: 'Run local-ci from a project root, or run "local-ci init" to create a .local-ci.yml.',
+          recommendation: 'Run local-ci-runner from a project root, or run "local-ci-runner init" to create a .local-ci.yml.',
         },
   );
 
@@ -252,7 +252,7 @@ function projectDiagnostics(facts: ProjectFacts): Diagnostic[] {
             severity: 'BLOCKED',
             category: 'configuration',
             detail: facts.config.problem ?? 'The configuration could not be used.',
-            recommendation: 'Fix the configuration, or run "local-ci init --force" to start fresh.',
+            recommendation: 'Fix the configuration, or run "local-ci-runner init --force" to start fresh.',
           }
         : {
             id: 'config',
@@ -260,7 +260,7 @@ function projectDiagnostics(facts: ProjectFacts): Diagnostic[] {
             severity: 'BLOCKED',
             category: 'configuration',
             detail: 'No .local-ci.yml was found.',
-            recommendation: 'Run "local-ci init" to create one.',
+            recommendation: 'Run "local-ci-runner init" to create one.',
           },
   );
 
@@ -478,7 +478,7 @@ function environmentVariableDiagnostics(facts: ProjectFacts, env: NodeJS.Process
       detail: `${missing.length} required variable(s) are not set: ${missing.join(', ')}.`,
       recommendation:
         `Set ${missing.join(', ')} in your shell before running the pipeline. ` +
-        'local-ci reports presence only and never reads or prints their values.',
+        'local-ci-runner reports presence only and never reads or prints their values.',
     },
   ];
 
@@ -489,7 +489,7 @@ function environmentVariableDiagnostics(facts: ProjectFacts, env: NodeJS.Process
       severity: 'WARNING',
       category: 'requirements',
       detail: `${hinted.join(', ')} appear(s) in .env.example but ${hinted.length === 1 ? 'is' : 'are'} not set.`,
-      recommendation: `Copy .env.example to .env and fill in ${hinted.join(', ')}. local-ci does not load .env for you.`,
+      recommendation: `Copy .env.example to .env and fill in ${hinted.join(', ')}. local-ci-runner does not load .env for you.`,
     });
   }
 

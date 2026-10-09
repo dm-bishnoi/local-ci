@@ -43,7 +43,7 @@ const stdout = (): string => out.join('\n');
 
 const skipProbes = { skipToolProbes: true as const };
 
-describe('local-ci doctor', () => {
+describe('local-ci-runner doctor', () => {
   it('exits 0 and prints sections for a healthy project', async () => {
     await withTempProject(async (cwd) => {
       await writeProject(cwd, HEALTHY_ANGULAR);
@@ -148,7 +148,7 @@ describe('local-ci doctor', () => {
   });
 });
 
-describe('local-ci preflight', () => {
+describe('local-ci-runner preflight', () => {
   it('exits 0 and reports PASS for a runnable pipeline', async () => {
     await withTempProject(async (cwd) => {
       await writeProject(cwd, HEALTHY_ANGULAR);
@@ -258,7 +258,7 @@ describe('exit codes and formatting', () => {
   });
 });
 
-describe('local-ci run gates on preflight', () => {
+describe('local-ci-runner run gates on preflight', () => {
   async function latestRunDir(cwd: string): Promise<string> {
     const { readdir } = await import('node:fs/promises');
     const base = join(cwd, '.local-ci', 'reports');

@@ -134,7 +134,7 @@ function nodeDiagnostic(facts: ProjectFacts): Diagnostic[] {
       ...base,
       severity: 'UNKNOWN',
       detail: `Node ${process.versions.node} is running, but ${declared} could not be evaluated: ${node.result.reason ?? 'unsupported syntax'}.`,
-      recommendation: 'Verify the Node version manually. local-ci will not claim a compatibility it could not check.',
+      recommendation: 'Verify the Node version manually. local-ci-runner will not claim a compatibility it could not check.',
     },
   ];
 }
@@ -219,7 +219,7 @@ function projectDiagnostics(facts: ProjectFacts): Diagnostic[] {
           severity: 'BLOCKED',
           category: 'project',
           detail: 'No package.json was found.',
-          recommendation: 'Run local-ci from a project root.',
+          recommendation: 'Run local-ci-runner from a project root.',
         },
   );
 
@@ -233,7 +233,7 @@ function projectDiagnostics(facts: ProjectFacts): Diagnostic[] {
             severity: 'BLOCKED',
             category: 'configuration',
             detail: facts.config.problem ?? 'The configuration could not be used.',
-            recommendation: 'Fix .local-ci.yml, or run "local-ci init --force" to start fresh.',
+            recommendation: 'Fix .local-ci.yml, or run "local-ci-runner init --force" to start fresh.',
           }
         : {
             id: 'config',
@@ -241,7 +241,7 @@ function projectDiagnostics(facts: ProjectFacts): Diagnostic[] {
             severity: 'BLOCKED',
             category: 'configuration',
             detail: 'No .local-ci.yml was found.',
-            recommendation: 'Run "local-ci init" to create one.',
+            recommendation: 'Run "local-ci-runner init" to create one.',
           },
     );
     return diagnostics;
@@ -422,7 +422,7 @@ function environmentVariableDiagnostics(facts: ProjectFacts, env: NodeJS.Process
           detail: `Required environment variable(s) not set: ${missing.join(', ')}.`,
           recommendation:
             `Set ${missing.join(', ')} before running the pipeline. ` +
-            'local-ci reports presence only and never reads or prints their values.',
+            'local-ci-runner reports presence only and never reads or prints their values.',
         },
   );
 

@@ -10,7 +10,7 @@ import { reportCommand } from './commands/report.js';
 const program = new Command();
 
 program
-  .name('local-ci')
+  .name('local-ci-runner')
   .description('Run CI-style validation locally before pushing to CI providers.')
   .version('0.1.0');
 
@@ -49,10 +49,10 @@ program.command('report')
   // Optional at the parser level so that omitting it produces this command's
   // own message — usage plus the run ids that actually exist — instead of a
   // bare commander "missing required argument" error.
-  .argument('[run-id]', 'run id to display, as printed by "local-ci run"')
+  .argument('[run-id]', 'run id to display, as printed by "local-ci-runner run"')
   .addHelpText(
     'after',
-    '\nExamples:\n  local-ci report 20261008-123456-abcd1234\n  local-ci report            # lists available runs\n\n' +
+    '\nExamples:\n  local-ci-runner report 20261008-123456-abcd1234\n  local-ci-runner report            # lists available runs\n\n' +
       'Reports are stored under .local-ci/reports/ in your project, one directory per run.',
   )
   .action(async (runId?: string) => {
@@ -61,10 +61,10 @@ program.command('report')
   });
 
 program.command('version')
-  .description('Print the local-ci version')
+  .description('Print the local-ci-runner version')
   .action(() => console.log('0.1.0'));
 
 program.parseAsync().catch((error: unknown) => {
-  console.error(`local-ci: ${error instanceof Error ? error.message : String(error)}`);
+  console.error(`local-ci-runner: ${error instanceof Error ? error.message : String(error)}`);
   process.exitCode = 1;
 });
