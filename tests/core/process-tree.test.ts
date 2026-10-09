@@ -166,4 +166,49 @@ describe('runProcess tree cleanup (integration)', () => {
     expect(result.exitCode).toBeNull();
     expect(Date.now() - started).toBeLessThan(20_000);
   }, 30_000);
+
+  it('cancellation terminates the grandchild, not just the direct child', async () => {
+    const { readFile, rm, readdir } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+
+    const controller = new AbortController();
+    const promise = runProcess(process.execPath, ['-e', PARENT_SCRIPT], {
+      cwd: process.cwd(),
+      signal: controller.signal,
+    });
+
+    // Wait until the grandchild marker file appears before aborting
+    const deadlineMarker = Date.now() + 10_000;
+    let grandchild: number | undefined;
+    while (Date.now() < deadlineMarker) {
+      const entries = await readdir(tmpdir());
+      const markers = entries.filter((name) => name.startsWith('local-ci-orphan-') && name.endsWith('.json'));
+      for (const name of markers) {
+        try {
+          const parsed = JSON.parse(await readFile(join(tmpdir(), name), 'utf8')) as { grandchild?: number };
+          if (typeof parsed.grandchild === 'number') grandchild = parsed.grandchild;
+          await rm(join(tmpdir(), name), { force: true });
+        } catch {
+          /* a torn marker is ignored */
+        }
+      }
+      if (grandchild) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    expect(grandchild, 'grandchild process was never spawned').toBeDefined();
+
+    controller.abort();
+    const result = await promise;
+
+    expect(result.cancelled).toBe(true);
+
+    const deadline = Date.now() + 8_000;
+    while (processIsAlive(grandchild) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    expect(processIsAlive(grandchild)).toBe(false);
+  }, 30_000);
 });
+
