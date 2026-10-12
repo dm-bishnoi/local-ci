@@ -57,7 +57,6 @@ export function isSensitiveName(name: string): boolean {
   if (upper === 'PWD' || upper === 'OLDPWD') return false;
   if (SENSITIVE_WORDS.some((word) => upper.includes(word))) return true;
   const segments = upper.split(/[^A-Z0-9]+/);
-  if (segments.length === 1 && NON_SECRET_SHELL_SEGMENTS.has(upper)) return false;
   return segments.some((segment) => SENSITIVE_SEGMENTS.has(segment));
 }
 
