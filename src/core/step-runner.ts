@@ -43,11 +43,28 @@ export interface PipelineStep {
   id: string;
   name: string;
   run(context: PipelineContext): Promise<StepResult>;
+  /**
+   * This step's own time limit. When set it replaces `settings.timeoutMs` for
+   * this step, so it can be longer as well as shorter than the pipeline limit.
+   */
+  timeoutMs?: number;
+  /**
+   * How long the runner may wait, after a timeout or cancellation, for this
+   * step to finish its own cleanup and return what it observed (command, exit
+   * details, output captured before termination).
+   *
+   * Only a step whose cleanup is itself bounded should set this. Absent or 0
+   * means the runner returns the moment the step is aborted, so a step that
+   * ignores its signal can never hold up the pipeline.
+   */
+  abortGraceMs?: number;
 }
 
 export interface StepRunOptions {
   /** Overrides the configured timeout for this step. */
   timeoutMs?: number;
+  /** Overrides {@link PipelineStep.abortGraceMs}. */
+  abortGraceMs?: number;
   /** Cancels the step when aborted. Defaults to `context.signal`. */
   signal?: AbortSignal;
   onStart?: (step: PipelineStep) => void;
@@ -85,6 +102,43 @@ interface RaceOutcome {
   result?: StepResult;
 }
 
+/**
+ * Waits up to `graceMs` for an aborted step to settle. Resolves to its result,
+ * or `undefined` when it rejected, returned nothing valid, or ran out of time.
+ */
+async function settleWithin(promise: Promise<StepResult>, graceMs: number): Promise<StepResult | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.then(
+        (result) => (result && isStepStatus(result.status) ? result : undefined),
+        () => undefined,
+      ),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), graceMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * The evidence an aborted step can still contribute: what ran and what it
+ * printed before it was stopped. The verdict itself is never taken from it —
+ * the runner already knows the step timed out or was cancelled.
+ */
+function abortEvidence(result: StepResult | undefined): Partial<StepResult> {
+  if (!result) return {};
+  const evidence: Partial<StepResult> = {};
+  if (result.command !== undefined) evidence.command = result.command;
+  if (result.exitCode !== undefined) evidence.exitCode = result.exitCode;
+  if (result.signal !== undefined) evidence.signal = result.signal;
+  if (result.stdout !== undefined) evidence.stdout = result.stdout;
+  if (result.stderr !== undefined) evidence.stderr = result.stderr;
+  return evidence;
+}
+
 function baseResult(step: PipelineStep, startedAt: Date, started: number): StepResult {
   return {
     id: step.id,
@@ -115,7 +169,7 @@ export async function runStep(
   const startedAt = new Date();
   const started = performance.now();
   const parentSignal = options.signal ?? context.signal;
-  const timeoutMs = options.timeoutMs ?? context.config.settings.timeoutMs;
+  const timeoutMs = options.timeoutMs ?? step.timeoutMs ?? context.config.settings.timeoutMs;
 
   const controller = new AbortController();
   const cleanups: Array<() => void> = [];
@@ -168,8 +222,9 @@ export async function runStep(
   }
 
   let outcome: RaceOutcome;
+  let stepPromise: Promise<StepResult> | undefined;
   try {
-    const stepPromise = step.run({ ...context, signal: controller.signal });
+    stepPromise = step.run({ ...context, signal: controller.signal });
     // Orphan guard: if we stop awaiting first, a late rejection must not crash.
     stepPromise.catch(() => undefined);
 
@@ -199,26 +254,40 @@ export async function runStep(
     finish();
   }
 
-  const base = baseResult(step, startedAt, started);
-
   if (outcome.kind === 'aborted') {
+    // Give a step with bounded cleanup the chance to report what it ran and
+    // printed. Without this a timed-out step — the case where output matters
+    // most — would be reported with no command and no output at all.
+    const graceMs = options.abortGraceMs ?? step.abortGraceMs ?? 0;
+    const late = graceMs > 0 && stepPromise ? await settleWithin(stepPromise, graceMs) : undefined;
+    const evidence = abortEvidence(late);
+    const unreported =
+      graceMs > 0 && late === undefined
+        ? ` The step did not report back within ${formatTimeout(graceMs)} of being stopped, so its output could not be captured.`
+        : '';
+    const base = baseResult(step, startedAt, started);
+
     if (timedOut) {
       return {
         ...base,
+        ...evidence,
         status: 'FAIL',
         timedOut: true,
         cancelled: false,
-        error: `Step timed out after ${formatTimeout(timeoutMs ?? 0)}`,
+        error: `Step timed out after ${formatTimeout(timeoutMs ?? 0)}${unreported}`,
       };
     }
     return {
       ...base,
+      ...evidence,
       status: 'CANCELLED',
       timedOut: false,
       cancelled: true,
-      error: 'Step was cancelled.',
+      error: `Step was cancelled.${unreported}`,
     };
   }
+
+  const base = baseResult(step, startedAt, started);
 
   const returned = outcome.result;
   if (!returned || !isStepStatus(returned.status)) {

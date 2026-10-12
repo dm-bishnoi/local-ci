@@ -8,7 +8,7 @@
  * cannot host the scenario deterministically.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   DETACHED_CHILD,
   processIsAlive,
@@ -73,6 +73,93 @@ describe('terminateTree', () => {
     expect(await terminateTree(Number.NaN, terminator, 10)).toBe(false);
     expect(terminator.calls).toEqual([]);
   });
+
+  it('returns as soon as an observable tree is gone, without force-killing', async () => {
+    const terminator = { ...recordingTerminator(), isAlive: () => false };
+    const started = Date.now();
+
+    expect(await terminateTree(1234, terminator, 5_000)).toBe(true);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(terminator.calls).toEqual([{ pid: 1234, signal: 'TERM' }]);
+  });
+
+  it('still escalates when an observable tree survives the grace period', async () => {
+    const terminator = { ...recordingTerminator(), isAlive: () => true };
+    await terminateTree(1234, terminator, 100);
+
+    expect(terminator.calls).toEqual([
+      { pid: 1234, signal: 'TERM' },
+      { pid: 1234, signal: 'KILL' },
+    ]);
+  });
+
+  it('treats a throwing liveness probe as alive and escalates', async () => {
+    const terminator = {
+      ...recordingTerminator(),
+      isAlive: () => {
+        throw new Error('probe failed');
+      },
+    };
+    await terminateTree(1234, terminator, 100);
+
+    expect(terminator.calls.map((call) => call.signal)).toEqual(['TERM', 'KILL']);
+  });
+});
+
+describe('runProcess waits for tree termination (F-8)', () => {
+  it('does not resolve until the termination it started has finished', async () => {
+    const real = treeTerminatorFor();
+    let killFinishedAt = 0;
+    const slowTerminator: TreeTerminator = {
+      canKillTree: true,
+      description: 'real kill, slow to report',
+      async kill(pid, signal) {
+        const outcome = await real.kill(pid, signal);
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        killFinishedAt = Date.now();
+        return outcome;
+      },
+      isAlive: (pid) => real.isAlive?.(pid) ?? processIsAlive(pid),
+    };
+
+    const result = await runProcess(process.execPath, ['-e', "console.log('ready'); setTimeout(() => {}, 60000)"], {
+      cwd: process.cwd(),
+      timeoutMs: 500,
+      treeTerminator: slowTerminator,
+      forceKillAfterMs: 2_000,
+    });
+    const resolvedAt = Date.now();
+
+    expect(result.timedOut).toBe(true);
+    expect(killFinishedAt).toBeGreaterThan(0);
+    expect(resolvedAt).toBeGreaterThanOrEqual(killFinishedAt);
+    expect(result.stdout).toContain('ready');
+  }, 30_000);
+
+  it('terminates only once when both the timeout and the abort signal fire', async () => {
+    const calls: string[] = [];
+    const real = treeTerminatorFor();
+    const counting: TreeTerminator = {
+      canKillTree: true,
+      description: 'counting',
+      kill(pid, signal = 'TERM') {
+        calls.push(String(signal));
+        return real.kill(pid, signal);
+      },
+      isAlive: (pid) => real.isAlive?.(pid) ?? processIsAlive(pid),
+    };
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 300);
+
+    await runProcess(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
+      cwd: process.cwd(),
+      timeoutMs: 300,
+      signal: controller.signal,
+      treeTerminator: counting,
+    });
+
+    expect(calls.filter((signal) => signal === 'TERM')).toHaveLength(1);
+  }, 30_000);
 });
 
 describe('processIsAlive', () => {
@@ -94,61 +181,138 @@ describe('runProcess tree cleanup (integration)', () => {
   const PARENT_SCRIPT = `
     const { spawn } = require('node:child_process');
     const fs = require('node:fs');
-    const os = require('node:os');
-    const path = require('node:path');
-    const file = path.join(os.tmpdir(), 'local-ci-orphan-' + process.pid + '.json');
-    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000); console.log("grandchild ready")'], {
+    const file = process.env.LOCAL_CI_ORPHAN_MARKER;
+    // Detached on Windows only. A Node parent puts its children in a
+    // kill-on-close Job Object, so they die with it even when the tree kill is
+    // broken, so the test could not tell. A detached grandchild, like the child
+    // of an npm .cmd shim, is not tied to its parent, so only a real tree kill
+    // removes it. On POSIX it must stay in the process group the kill targets.
+    // It lives far longer than any wait below, so a leak is never masked by
+    // the grandchild simply finishing.
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 300000); console.log("grandchild ready")'], {
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform === 'win32',
     });
     child.stdout.on('data', () => {
-      fs.writeFileSync(file, JSON.stringify({ grandchild: child.pid }));
+      fs.writeFileSync(file, JSON.stringify({ grandchild: child.pid, parent: process.pid }));
     });
     setTimeout(() => {}, 60000);
   `;
 
-  it('timeout terminates the grandchild, not just the direct child', async () => {
-    const { readFile, rm } = await import('node:fs/promises');
+  interface Marker {
+    grandchild?: number;
+    parent?: number;
+  }
+
+  /**
+   * A marker path owned by one run alone. Scanning the shared tmpdir for any
+   * marker would let a stale file from an interrupted run supply a dead pid,
+   * and the test would pass without having exercised cleanup at all.
+   */
+  async function markerDir(): Promise<{ dir: string; markerFile: string }> {
+    const { mkdtemp } = await import('node:fs/promises');
     const { join } = await import('node:path');
     const { tmpdir } = await import('node:os');
+    const dir = await mkdtemp(join(tmpdir(), 'local-ci-tree-'));
+    return { dir, markerFile: join(dir, 'grandchild.json') };
+  }
 
-    const result = await runProcess(process.execPath, ['-e', PARENT_SCRIPT], {
-      cwd: process.cwd(),
-      timeoutMs: 1_500,
-    });
-
-    expect(result.timedOut).toBe(true);
-    expect(result.failed).toBe(true);
-
-    // The marker is named after the *parent* child's pid, which we do not know
-    // up front; scan the tmpdir for any marker written recently.
-    const { readdir } = await import('node:fs/promises');
-    const entries = await readdir(tmpdir());
-    const markers = entries.filter((name) => name.startsWith('local-ci-orphan-') && name.endsWith('.json'));
-
-    let grandchild: number | undefined;
-    for (const name of markers) {
+  /** Bounded wait for the grandchild to report its pid. */
+  async function waitForMarker(markerFile: string, withinMs: number): Promise<Marker> {
+    const { readFile } = await import('node:fs/promises');
+    // node:timers/promises is not affected by vi.useFakeTimers.
+    const { setTimeout: sleep } = await import('node:timers/promises');
+    const readyBy = Date.now() + withinMs;
+    while (Date.now() < readyBy) {
       try {
-        const parsed = JSON.parse(await readFile(join(tmpdir(), name), 'utf8')) as { grandchild?: number };
-        if (typeof parsed.grandchild === 'number') grandchild = parsed.grandchild;
-        await rm(join(tmpdir(), name), { force: true });
+        const marker = JSON.parse(await readFile(markerFile, 'utf8')) as Marker;
+        if (typeof marker.grandchild === 'number') return marker;
       } catch {
-        /* a torn marker is not the assertion's problem */
+        /* not written yet, or mid-write */
+      }
+      await sleep(25);
+    }
+    return {};
+  }
+
+  /** The guarantee itself: both the direct child and its grandchild are gone. */
+  async function expectTreeGone(marker: Marker, cause: string): Promise<void> {
+    const { setTimeout: sleep } = await import('node:timers/promises');
+    // Termination is asynchronous and may escalate, so liveness is polled briefly.
+    const deadline = Date.now() + 8_000;
+    while ((processIsAlive(marker.grandchild) || processIsAlive(marker.parent)) && Date.now() < deadline) {
+      await sleep(100);
+    }
+    expect(processIsAlive(marker.grandchild), `grandchild survived the ${cause}`).toBe(false);
+    expect(processIsAlive(marker.parent), `direct child survived the ${cause}`).toBe(false);
+  }
+
+  /**
+   * Runs on every exit path, including a failed precondition or assertion: no
+   * process may outlive the test, and the run is awaited so the next test
+   * never starts while this tree is still shutting down.
+   */
+  async function cleanUp(marker: Marker, pending: Promise<unknown> | undefined, dir: string): Promise<void> {
+    const { rm } = await import('node:fs/promises');
+    for (const pid of [marker.grandchild, marker.parent]) {
+      if (!processIsAlive(pid)) continue;
+      try {
+        process.kill(pid as number, 'SIGKILL');
+      } catch {
+        /* already gone */
       }
     }
+    await pending?.catch(() => undefined);
+    await rm(dir, { recursive: true, force: true });
+  }
 
-    // The whole point of the test: a grandchild was spawned, and it must be
-    // gone. If no marker appeared, this is a hard failure rather than a skip —
-    // a silently skipped orphan test cannot catch the leak it exists for.
-    expect(grandchild, 'grandchild process was never spawned').toBeDefined();
+  it('timeout terminates the grandchild, not just the direct child', async () => {
+    const { dir, markerFile } = await markerDir();
+    let pending: ReturnType<typeof runProcess> | undefined;
+    let marker: Marker = {};
 
-    // Termination is asynchronous and escalates after a grace period, so the
-    // liveness check is polled briefly.
-    const deadline = Date.now() + 8_000;
-    while (processIsAlive(grandchild) && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
+    // The timeout must fire while the grandchild is running, or there is no
+    // grandchild to clean up and the test proves nothing. Two cold Node
+    // start-ups can take longer than any fixed timeout on a loaded machine, so
+    // the timeout timer is captured and fired only once the grandchild has
+    // confirmed it is up. It is the real timer callback, so the real timeout
+    // path (timedOut -> terminate the tree) is what runs.
+    //
+    // Only setTimeout/clearTimeout are faked, and only until the timer fires:
+    // the wait below uses node:timers/promises, which fake timers do not touch.
+    try {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      let fired = false;
+      try {
+        pending = runProcess(process.execPath, ['-e', PARENT_SCRIPT], {
+          cwd: process.cwd(),
+          timeoutMs: 1_500,
+          env: { LOCAL_CI_ORPHAN_MARKER: markerFile },
+        });
+
+        // Bounded wait for the precondition. Failing here is a different fact
+        // from a leak, and says so.
+        marker = await waitForMarker(markerFile, 30_000);
+        expect(marker.grandchild, 'precondition: the grandchild never started within 30s').toBeTypeOf('number');
+        expect(processIsAlive(marker.grandchild), 'precondition: the grandchild is running').toBe(true);
+
+        vi.advanceTimersByTime(1_500);
+        fired = true;
+      } finally {
+        // Even when the precondition fails, fire the captured timeout so the
+        // tree is still terminated instead of left running.
+        if (!fired) vi.advanceTimersByTime(1_500);
+        vi.useRealTimers();
+      }
+
+      const result = await pending;
+      expect(result.timedOut).toBe(true);
+      expect(result.failed).toBe(true);
+      await expectTreeGone(marker, 'timeout');
+    } finally {
+      await cleanUp(marker, pending, dir);
     }
-    expect(processIsAlive(grandchild)).toBe(false);
-  }, 30_000);
+  }, 60_000);
 
   it('cancellation terminates the process tree', async () => {
     const controller = new AbortController();
@@ -168,47 +332,34 @@ describe('runProcess tree cleanup (integration)', () => {
   }, 30_000);
 
   it('cancellation terminates the grandchild, not just the direct child', async () => {
-    const { readFile, rm, readdir } = await import('node:fs/promises');
-    const { join } = await import('node:path');
-    const { tmpdir } = await import('node:os');
-
+    const { dir, markerFile } = await markerDir();
     const controller = new AbortController();
-    const promise = runProcess(process.execPath, ['-e', PARENT_SCRIPT], {
-      cwd: process.cwd(),
-      signal: controller.signal,
-    });
+    let pending: ReturnType<typeof runProcess> | undefined;
+    let marker: Marker = {};
 
-    // Wait until the grandchild marker file appears before aborting
-    const deadlineMarker = Date.now() + 10_000;
-    let grandchild: number | undefined;
-    while (Date.now() < deadlineMarker) {
-      const entries = await readdir(tmpdir());
-      const markers = entries.filter((name) => name.startsWith('local-ci-orphan-') && name.endsWith('.json'));
-      for (const name of markers) {
-        try {
-          const parsed = JSON.parse(await readFile(join(tmpdir(), name), 'utf8')) as { grandchild?: number };
-          if (typeof parsed.grandchild === 'number') grandchild = parsed.grandchild;
-          await rm(join(tmpdir(), name), { force: true });
-        } catch {
-          /* a torn marker is ignored */
-        }
-      }
-      if (grandchild) break;
-      await new Promise((resolve) => setTimeout(resolve, 100));
+    try {
+      pending = runProcess(process.execPath, ['-e', PARENT_SCRIPT], {
+        cwd: process.cwd(),
+        signal: controller.signal,
+        env: { LOCAL_CI_ORPHAN_MARKER: markerFile },
+      });
+
+      // Abort only once the grandchild is up; the abort is under the test's
+      // control, so there is no timing race to remove here.
+      marker = await waitForMarker(markerFile, 10_000);
+      expect(marker.grandchild, 'precondition: the grandchild never started within 10s').toBeTypeOf('number');
+      expect(processIsAlive(marker.grandchild), 'precondition: the grandchild is running').toBe(true);
+
+      controller.abort();
+      const result = await pending;
+      expect(result.cancelled).toBe(true);
+      await expectTreeGone(marker, 'cancellation');
+    } finally {
+      // Without a timeout, only the abort ends this run, so a failed
+      // precondition must still abort it.
+      controller.abort();
+      await cleanUp(marker, pending, dir);
     }
-
-    expect(grandchild, 'grandchild process was never spawned').toBeDefined();
-
-    controller.abort();
-    const result = await promise;
-
-    expect(result.cancelled).toBe(true);
-
-    const deadline = Date.now() + 8_000;
-    while (processIsAlive(grandchild) && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    expect(processIsAlive(grandchild)).toBe(false);
   }, 30_000);
 });
 

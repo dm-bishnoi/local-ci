@@ -38,7 +38,7 @@
 import type { PipelineRunResult, PipelineStatus } from '../core/pipeline-runner.js';
 import type { StepResult, StepStatus } from '../core/step-runner.js';
 import { aggregateOutcomes, outcomeOf, RUN_OUTCOMES, type RunOutcome } from '../core/status.js';
-import { REDACTED, redact, sensitiveEnvValues } from '../core/redaction.js';
+import { REDACTED, maskTokenPatterns, redact, sensitiveEnvValues } from '../core/redaction.js';
 import type { EnvironmentFingerprint } from '../env/fingerprint.js';
 import type { DiagnosticReport } from '../diagnostics/types.js';
 import type { CoverageInfo } from './coverage.js';
@@ -256,13 +256,14 @@ export function maskCredentialUrls(text: string): string {
 
 /**
  * The single masking step applied to every string that came from a child
- * process. Structure is masked first, then known values.
+ * process. Known values are masked first (exact matches are the strongest
+ * evidence), then URL userinfo, then credentials recognisable by format.
  *
  * Callers bound the result separately, and always *after* masking: cutting text
  * at a limit first could slice a mask in half and leave a partial secret visible.
  */
 export function maskSecrets(text: string, secrets: readonly string[]): string {
-  return redact(maskCredentialUrls(text), secrets);
+  return maskTokenPatterns(maskCredentialUrls(redact(text, secrets)));
 }
 
 function toCount(step: StepResult, counts: StepCounts): void {

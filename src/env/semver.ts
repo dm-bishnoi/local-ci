@@ -54,116 +54,226 @@ function compare(a: Version, b: Version): number {
   return 0;
 }
 
-/**
- * Resolves a partial version against the version being tested.
- *
- * `>=18` means `>=18.0.0`, and `18.x` means "any 18 release". The missing
- * components are filled from the version under test, which is how every real
- * Node range behaves.
- */
-function resolvePartial(operator: string, partial: string, base: Version): Version | 'unknown' {
-  const parts = partial.split('.');
-  const major = Number(parts[0]);
-  if (!Number.isInteger(major)) return 'unknown';
+type Operator = '>=' | '>' | '<=' | '<' | '=';
 
-  if (operator === '>' || operator === '>=') {
-    // `>=18` is understood as `>=18.0.0`; `>18` as `>18.0.0`.
-    return { major, minor: parts[1] === undefined ? 0 : Number(parts[1]), patch: parts[2] === undefined ? 0 : Number(parts[2]) };
-  }
-
-  if (operator === '<' || operator === '<=') {
-    // `<18` must exclude 18.x entirely, so it is anchored at the next major.
-    if (parts.length === 1) return { major: major + 1, minor: 0, patch: 0 };
-    if (parts.length === 2) return { major: major, minor: Number(parts[1]) + 1, patch: 0 };
-    return { major, minor: Number(parts[1]), patch: Number(parts[2]) };
-  }
-
-  return {
-    major,
-    minor: parts[1] === undefined ? base.minor : Number(parts[1]),
-    patch: parts[2] === undefined ? base.patch : Number(parts[2]),
-  };
+/** One plain comparison, the only form the evaluator understands. */
+interface Primitive {
+  operator: Operator;
+  version: Version;
 }
 
-const COMPARATOR = /^(>=|<=|>|<|=)?\s*(.+)$/;
+/**
+ * A comparator after parsing. `any` is a wildcard (`*`, `x`), `unknown` is
+ * something this checker refuses to interpret, and `primitives` is the rule
+ * expressed as plain comparisons that must all hold.
+ */
+type Parsed =
+  | { kind: 'any' }
+  | { kind: 'unknown'; reason: string }
+  | { kind: 'primitives'; primitives: Primitive[] };
 
-/** Comparators this module deliberately refuses to interpret. */
-const UNSUPPORTED = /^[\^~]|x\b|\*|latest|stable|canary|nolock/i;
+/** A version with optional components: `18`, `18.2`, `18.x`, `18.2.3-rc.1`. */
+interface PartialVersion {
+  major: number | undefined;
+  minor: number | undefined;
+  patch: number | undefined;
+  prerelease: string | undefined;
+}
 
-function evaluateComparator(base: Version, comparator: string): RangeVerdict | 'unknown' {
-  // `.nvmrc` files are written as `v20.11.0` far more often than `20.11.0`.
-  // The `v` is a display prefix, not part of the number, so it is stripped
-  // before matching rather than turning a readable requirement into unknown.
-  const trimmed = comparator.trim().replace(/^v(?=\d)/, '');
-  if (trimmed === '') return 'unknown';
-  if (UNSUPPORTED.test(trimmed)) return 'unknown';
+const WILDCARD = /^[xX*]$/;
+const PARTIAL = /^v?(\d+|[xX*])(?:\.(\d+|[xX*]))?(?:\.(\d+|[xX*]))?(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
 
-  const match = COMPARATOR.exec(trimmed);
-  if (!match) return 'unknown';
+/**
+ * Parses a partial version. A wildcard component makes every component after
+ * it a wildcard too, so `1.x.3` is read as `1.x.x`.
+ */
+function parsePartial(raw: string): PartialVersion | null {
+  const match = PARTIAL.exec(raw);
+  if (!match) return null;
 
-  const operator = match[1] ?? '=';
-  const partial = (match[2] ?? '').trim();
-  if (!/^\d+(\.\d+){0,2}(-[0-9A-Za-z.-]+)?$/.test(partial)) return 'unknown';
+  const numbers: Array<number | undefined> = [];
+  let open = true;
+  for (const component of [match[1], match[2], match[3]]) {
+    if (component === undefined || WILDCARD.test(component)) open = false;
+    numbers.push(open && component !== undefined ? Number(component) : undefined);
+  }
 
-  const target = resolvePartial(operator, partial, base);
-  if (target === 'unknown') return 'unknown';
+  return { major: numbers[0], minor: numbers[1], patch: numbers[2], prerelease: match[4] };
+}
 
+function version(major: number, minor: number, patch: number, prerelease?: string): Version {
+  return { major, minor, patch, ...(prerelease ? { prerelease } : {}) };
+}
+
+const unknown = (reason: string): Parsed => ({ kind: 'unknown', reason });
+const primitives = (...list: Primitive[]): Parsed => ({ kind: 'primitives', primitives: list });
+
+/**
+ * Rewrites a comparator as plain comparisons, following npm's range rules:
+ * `18` is `>=18.0.0 <19.0.0`, `>18` is `>=19.0.0`, `<=18` is `<19.0.0`,
+ * `^1.2.3` is `>=1.2.3 <2.0.0` and `~1.2.3` is `>=1.2.3 <1.3.0`.
+ */
+function desugar(operator: Operator | '^' | '~', partial: PartialVersion): Parsed {
+  const { major, minor, patch, prerelease } = partial;
+
+  if (major === undefined) {
+    // A bare wildcard matches everything. `>*` and `<*` match nothing useful.
+    return operator === '>' || operator === '<' ? unknown('A wildcard with ">" or "<" cannot be evaluated.') : { kind: 'any' };
+  }
+
+  const floor = version(major, minor ?? 0, patch ?? 0, prerelease);
+  const full = minor !== undefined && patch !== undefined;
+  // First version above everything the partial names: 18 -> 19.0.0, 18.2 -> 18.3.0.
+  const ceiling = minor === undefined ? version(major + 1, 0, 0) : version(major, minor + 1, 0);
+
+  switch (operator) {
+    case '=':
+      return full
+        ? primitives({ operator: '=', version: floor })
+        : primitives({ operator: '>=', version: floor }, { operator: '<', version: ceiling });
+    case '>=':
+      return primitives({ operator: '>=', version: floor });
+    case '>':
+      return full ? primitives({ operator: '>', version: floor }) : primitives({ operator: '>=', version: ceiling });
+    case '<':
+      return primitives({ operator: '<', version: floor });
+    case '<=':
+      return full ? primitives({ operator: '<=', version: floor }) : primitives({ operator: '<', version: ceiling });
+    case '~':
+      return primitives({ operator: '>=', version: floor }, { operator: '<', version: ceiling });
+    case '^': {
+      // Caret allows changes that do not touch the left-most non-zero component.
+      const upper =
+        major > 0
+          ? version(major + 1, 0, 0)
+          : minor === undefined
+            ? version(1, 0, 0)
+            : minor > 0 || patch === undefined
+              ? version(0, minor + 1, 0)
+              : version(0, 0, patch + 1);
+      return primitives({ operator: '>=', version: floor }, { operator: '<', version: upper });
+    }
+  }
+}
+
+const COMPARATOR = /^(>=|<=|>|<|=|\^|~)?(.*)$/;
+
+function parseComparator(token: string): Parsed {
+  const match = COMPARATOR.exec(token);
+  const operator = (match?.[1] ?? '=') as Operator | '^' | '~';
+  const partial = parsePartial((match?.[2] ?? '').trim());
+  if (!partial) return unknown(`"${token}" is outside the comparators this checker supports.`);
+  return desugar(operator, partial);
+}
+
+function holds(base: Version, { operator, version: target }: Primitive): boolean {
   const order = compare(base, target);
   switch (operator) {
-    case '>=': return order >= 0 ? 'satisfied' : 'violated';
-    case '>': return order > 0 ? 'satisfied' : 'violated';
-    case '<=': return order <= 0 ? 'satisfied' : 'violated';
-    case '<': return order < 0 ? 'satisfied' : 'violated';
-    default:
-      // A bare or `=`-prefixed comparator is an exact match on the components it
-      // names. `18` therefore means "any 18.x".
-      return order === 0 ? 'satisfied' : 'violated';
+    case '>=':
+      return order >= 0;
+    case '>':
+      return order > 0;
+    case '<=':
+      return order <= 0;
+    case '<':
+      return order < 0;
+    case '=':
+      return order === 0;
   }
+}
+
+/**
+ * Operators may be separated from their version by whitespace (`>= 18`), and
+ * comma is accepted as an AND separator. Both are normalised before the group
+ * is split into comparators, so the split can never separate an operator from
+ * its operand.
+ */
+function tokenize(group: string): string[] {
+  return group
+    .replace(/(>=|<=|>|<|=|\^|~)\s+/g, '$1')
+    .replace(/,/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter((token) => token.length > 0);
+}
+
+function formatVersion(value: Version): string {
+  return `${value.major}.${value.minor}.${value.patch}${value.prerelease ? `-${value.prerelease}` : ''}`;
+}
+
+interface GroupResult {
+  verdict: RangeVerdict;
+  comparator?: string;
+  reason?: string;
+}
+
+/**
+ * A group is an AND of comparators: one failure fails it, whatever else is in
+ * it; an unreadable member leaves an otherwise passing group unknown.
+ */
+function evaluateGroup(base: Version, group: string): GroupResult {
+  const tokens = tokenize(group);
+  if (tokens.length === 0) return { verdict: 'unknown', reason: 'The range contains an empty alternative.' };
+  if (tokens.includes('-')) {
+    return { verdict: 'unknown', reason: 'Hyphen ranges are outside the comparators this checker supports.' };
+  }
+
+  let unreadable: string | undefined;
+  for (const token of tokens) {
+    const parsed = parseComparator(token);
+    if (parsed.kind === 'unknown') {
+      unreadable ??= parsed.reason;
+      continue;
+    }
+    if (parsed.kind === 'primitives' && !parsed.primitives.every((primitive) => holds(base, primitive))) {
+      return { verdict: 'violated', comparator: token, reason: `"${token}" is not satisfied by ${formatVersion(base)}.` };
+    }
+  }
+
+  return unreadable === undefined
+    ? { verdict: 'satisfied', comparator: group.trim() }
+    : { verdict: 'unknown', reason: unreadable };
 }
 
 /**
  * Evaluates a version against an npm-style range.
  *
- * Supported: space/comma separated comparators using `>=`, `>`, `<=`, `<`, `=`
- * and bare versions — for example `>=18`, `>=18 <21`, `20.x`, `18.20.4`.
+ * A range is alternatives separated by `||`; each alternative is comparators
+ * that must all hold (separated by whitespace or commas). Supported
+ * comparators: `>=`, `>`, `<=`, `<`, `=`, bare versions, partial versions
+ * (`18`, `18.2`), x-ranges (`18.x`, `*`), caret (`^18.19.0`) and tilde
+ * (`~18.19.0`), with optional whitespace after the operator.
  *
- * Anything else (caret, tilde, `x` wildcards, dist-tags) returns `unknown` with
- * a reason, so the caller can warn rather than assert a compatibility it did not
- * actually verify.
+ * Anything else — dist-tags, hyphen ranges, text — returns `unknown` with a
+ * reason, so the caller can warn rather than assert a compatibility it did not
+ * actually verify. `unknown` is never promoted to `satisfied`.
  */
-export function satisfies(version: string, range: string): RangeResult {
-  const base = parseVersion(version);
-  if (!base) return { verdict: 'unknown', reason: `"${version}" is not a recognizable version.` };
+export function satisfies(versionText: string, range: string): RangeResult {
+  const base = parseVersion(versionText);
+  if (!base) return { verdict: 'unknown', reason: `"${versionText}" is not a recognizable version.` };
 
   const trimmedRange = range.trim();
   if (trimmedRange === '' || trimmedRange === '*' || trimmedRange === 'latest') {
     return { verdict: 'satisfied', reason: 'no version constraint is declared.' };
   }
 
-  const comparators = trimmedRange.split(/\s*\|\|\s*|\s*,\s*|\s+/).filter((part) => part.length > 0);
-  if (comparators.length === 0) return { verdict: 'unknown', reason: 'The range could not be read.' };
+  const results = trimmedRange.split('||').map((group) => evaluateGroup(base, group));
 
-  const results: Array<{ comparator: string; verdict: RangeVerdict | 'unknown'; reason?: string }> = comparators.map(
-    (comparator) => {
-      const verdict = evaluateComparator(base, comparator);
-      return {
-        comparator,
-        verdict,
-        ...(verdict === 'unknown' ? { reason: `"${comparator}" is outside the comparators this checker supports.` } : {}),
-      };
-    },
-  );
+  // Alternatives are ORed: one satisfied branch settles it; otherwise an
+  // unreadable branch means the answer is not knowable; only when every branch
+  // was read and failed is the range violated.
+  const satisfied = results.find((result) => result.verdict === 'satisfied');
+  if (satisfied) return { verdict: 'satisfied', ...(satisfied.comparator ? { comparator: satisfied.comparator } : {}) };
 
-  // An OR group is satisfied if any branch is; otherwise every unsupported
-  // branch means the answer genuinely is not knowable.
-  if (results.some((result) => result.verdict === 'satisfied')) {
-    return { verdict: 'satisfied', comparator: results.find((r) => r.verdict === 'satisfied')?.comparator };
-  }
-  if (results.some((result) => result.verdict === 'violated')) {
-    const failed = results.find((result) => result.verdict === 'violated');
-    return { verdict: 'violated', comparator: failed?.comparator, reason: `"${failed?.comparator}" is not satisfied by ${version}.` };
-  }
-  return { verdict: 'unknown', reason: results[0]?.reason };
+  const undecided = results.find((result) => result.verdict === 'unknown');
+  if (undecided) return { verdict: 'unknown', ...(undecided.reason ? { reason: undecided.reason } : {}) };
+
+  const failed = results[0];
+  return {
+    verdict: 'violated',
+    ...(failed?.comparator ? { comparator: failed.comparator } : {}),
+    ...(failed?.reason ? { reason: failed.reason } : {}),
+  };
 }
 
 /** Reads a `.nvmrc` body, tolerating comments and surrounding whitespace. */

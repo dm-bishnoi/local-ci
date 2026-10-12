@@ -48,6 +48,12 @@ function detectionFor(facts: ProjectFacts): AngularDetection {
   return facts.angular ?? EMPTY_DETECTION;
 }
 
+/** True when package.json declares a non-empty script with this exact name. */
+export function hasProjectScript(detection: AngularDetection, script: string): boolean {
+  const body = Object.hasOwn(detection.scripts, script) ? detection.scripts[script] : undefined;
+  return typeof body === 'string' && body.trim() !== '';
+}
+
 /**
  * The package manager must actually be usable before any step is dispatched.
  *
@@ -275,6 +281,28 @@ function projectDiagnostics(facts: ProjectFacts): Diagnostic[] {
   // populate it. Otherwise the run would fail on a missing module for a reason
   // that has nothing to do with the project's health.
   const hasInstallStep = config.pipeline.includes('install');
+
+  // Without a lockfile, every package manager's install *writes* one (and may
+  // resolve newer versions than CI would). A local CI check must not quietly
+  // change the project it is checking, so the install step is blocked instead.
+  // A scripted `install` is the project's own command, so what it does is its
+  // owner's decision; the gate only protects the built-in install.
+  if (hasInstallStep && !config.steps?.['install'] && facts.packageJsonExists && detectionFor(facts).lockfile === null) {
+    diagnostics.push({
+      id: 'lockfile',
+      label: 'Lockfile',
+      severity: 'BLOCKED',
+      category: 'project',
+      detail:
+        'No lockfile was found in this project or its workspace root. Installing without one would create a ' +
+        'lockfile and could install different versions than CI.',
+      recommendation:
+        'Generate and commit a lockfile (for example run "npm install" once yourself), or remove "install" ' +
+        'from the pipeline and install dependencies manually.',
+      steps: ['install'],
+    });
+  }
+
   if (hasInstallStep) {
     diagnostics.push(
       facts.dependenciesOnDisk.installed
@@ -316,6 +344,24 @@ function pipelineDiagnostics(facts: ProjectFacts): Diagnostic[] {
 
   for (const stepId of config.pipeline) {
     const label = `step ${stepId}`;
+
+    // A step the configuration scripts is implemented by the project's own
+    // script; the only question is whether that script exists.
+    const scripted = config.steps?.[stepId];
+    if (scripted !== undefined) {
+      if (!hasProjectScript(detection, scripted.script)) {
+        diagnostics.push({
+          id: `step:${stepId}`,
+          label,
+          severity: 'UNSUPPORTED',
+          category: 'pipeline',
+          detail: `package.json has no script named "${scripted.script}".`,
+          recommendation: `Add a "${scripted.script}" script to package.json, or fix the name under steps.${stepId} in .local-ci.yml. This step will report UNSUPPORTED.`,
+          steps: [stepId],
+        });
+      }
+      continue;
+    }
 
     if (!known.has(stepId)) {
       diagnostics.push({

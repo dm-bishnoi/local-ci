@@ -1,14 +1,17 @@
 import { CONFIG_FILE } from '../../config/loader.js';
+import { withEffectiveDefaults, type LocalCiConfig } from '../../config/schema.js';
 import {
   describeMissingAngular,
   registerAngularSteps,
+  STEP_NAMES,
   type AngularDetection,
 } from '../../adapters/angular/index.js';
 import { createRunCancellation } from '../../core/cancellation.js';
 import { PipelineRunner, type PipelineRunResult } from '../../core/pipeline-runner.js';
+import { createMissingScriptStep, createScriptStep } from '../../core/script-step.js';
 import { StepRegistry } from '../../core/step-runner.js';
 import { collectProjectFacts, type ProjectFacts } from '../../diagnostics/facts.js';
-import { runPreflightChecks } from '../../diagnostics/preflight.js';
+import { hasProjectScript, runPreflightChecks } from '../../diagnostics/preflight.js';
 import {
   buildDiagnosticReport,
   blockingDiagnostics,
@@ -34,18 +37,52 @@ import { buildRunReport, exitCodeForStatus } from '../../reporters/report-model.
  */
 function buildRegistry(
   facts: ProjectFacts,
-  projectType: string,
-  pipeline: readonly string[],
+  config: LocalCiConfig,
 ): { registry: StepRegistry; angular: AngularDetection | null } {
   const registry = new StepRegistry();
-
-  if (projectType.toLowerCase() !== 'angular') return { registry, angular: null };
-
+  const scripted = config.steps ?? {};
+  const isAngular = config.project.type.toLowerCase() === 'angular';
   const detection = facts.angular;
-  if (detection === null || !detection.detected) return { registry, angular: detection };
 
-  registerAngularSteps(registry, detection, pipeline);
-  return { registry, angular: detection };
+  if (isAngular && (detection === null || !detection.detected)) return { registry, angular: detection };
+
+  // A `steps` entry replaces the built-in implementation of the same id, so the
+  // adapter is only asked for the ids the configuration did not script.
+  if (isAngular && detection !== null) {
+    registerAngularSteps(
+      registry,
+      detection,
+      config.pipeline.filter((id) => !Object.hasOwn(scripted, id)),
+    );
+  }
+
+  registerScriptSteps(registry, facts, scripted);
+  return { registry, angular: isAngular ? detection : null };
+}
+
+/** Registers the configuration's `steps` entries, for any project type. */
+function registerScriptSteps(
+  registry: StepRegistry,
+  facts: ProjectFacts,
+  scripted: NonNullable<LocalCiConfig['steps']>,
+): void {
+  const packageManager = facts.angular?.packageManager ?? 'npm';
+
+  for (const [id, definition] of Object.entries(scripted)) {
+    // Own properties only: an id such as "constructor" must not pick up Object members.
+    const name = (Object.hasOwn(STEP_NAMES, id) ? STEP_NAMES[id] : undefined) ?? id;
+    registry.register(
+      facts.angular !== null && hasProjectScript(facts.angular, definition.script)
+        ? createScriptStep({
+            id,
+            name,
+            packageManager,
+            script: definition.script,
+            ...(definition.timeoutMs !== undefined ? { timeoutMs: definition.timeoutMs } : {}),
+          })
+        : createMissingScriptStep(id, name, definition.script),
+    );
+  }
 }
 
 /**
@@ -223,7 +260,7 @@ export async function runCommand(cwd: string, options: RunCommandOptions = {}): 
     return reportRun(cwd, result, metadata, gate);
   }
 
-  const { registry, angular } = buildRegistry(facts, config.project.type, config.pipeline);
+  const { registry, angular } = buildRegistry(facts, config);
 
   // Configuration promises Angular but the project is not one: blocked, with
   // the same artifact set as any other run.
@@ -261,7 +298,9 @@ export async function runCommand(cwd: string, options: RunCommandOptions = {}): 
 
   let result: PipelineRunResult;
   try {
-    result = await runner.run({ cwd, config, runId, signal: cancellation.signal });
+    // The documented default timeout is applied here, at the boundary where a
+    // user's configuration becomes a run, so no step can run without a limit.
+    result = await runner.run({ cwd, config: withEffectiveDefaults(config), runId, signal: cancellation.signal });
   } finally {
     progress.stop();
     cancellation.dispose();

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   describeCommand,
   isSensitiveName,
+  maskTokenPatterns,
   redact,
   sanitizeArgs,
   sensitiveEnvValues,
@@ -78,5 +79,83 @@ describe('redaction', () => {
 
   it('leaves short text untouched', () => {
     expect(truncate('short', 100)).toBe('short');
+  });
+});
+/**
+ * F-1 regression: common CI credential names, and credentials recognisable by
+ * format, are masked; ordinary names and build output are left alone.
+ */
+describe('redaction coverage (F-1)', () => {
+  it.each([
+    'GH_PAT',
+    'AZURE_DEVOPS_EXT_PAT',
+    'ADO_PAT',
+    'STRIPE_KEY',
+    'SIGNING_KEY',
+    'DB_PWD',
+    'SMTP_PASS',
+    'SENTRY_DSN',
+    'SQL_CONNECTION_STRING',
+    'SLACK_WEBHOOK_URL',
+    'SYSTEM_ACCESSTOKEN',
+  ])('treats %s as sensitive', (name) => {
+    expect(isSensitiveName(name)).toBe(true);
+  });
+
+  it.each(['PATH', 'PATHEXT', 'KEYBOARD_LAYOUT', 'MONKEY_MODE', 'COMPASS', 'NODE_ENV', 'CI', 'PWD', 'OLDPWD', 'pwd'])(
+    'does not treat %s as sensitive',
+    (name) => {
+      expect(isSensitiveName(name)).toBe(false);
+    },
+  );
+
+  it.each([
+    ['Authorization: Bearer abc.def-ghi', 'Authorization: Bearer ***'],
+    ['authorization=Basic dXNlcjpwYXNz', 'authorization=Basic ***'],
+    ['curl -H "Authorization: token ghx123"', 'curl -H "Authorization: token ***"'],
+    ['sent bearer AbCdEfGhIjKlMnOpQrSt', 'sent bearer ***'],
+    ['jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc123def done', 'jwt *** done'],
+    ['token ghp_aaaaBBBBccccDDDD1111eeee in log', 'token *** in log'],
+    ['github_pat_11ABCDEFG0123456789_abcdefghijklmnop', '***'],
+    ['npm_abcdefghijklmnopqrstuvwxyz0123456789', '***'],
+    ['//registry.npmjs.org/:_authToken=s3cr3t-value', '//registry.npmjs.org/:_authToken=***'],
+    ['xoxb-1234567890-abcdefghij', '***'],
+    ['key AKIAABCDEFGHIJKLMNOP used', 'key *** used'],
+    ['Server=db;User Id=sa;Password=hunter2;', 'Server=db;User Id=sa;Password=***;'],
+    ['AccountName=acct;AccountKey=abc+def/ghi==;', 'AccountName=acct;AccountKey=***;'],
+  ])('masks %j by format', (input, expected) => {
+    expect(maskTokenPatterns(input)).toBe(expected);
+  });
+
+  it.each([
+    'Compiled successfully in 4.2s',
+    'Local: http://localhost:4200/',
+    '> npm run build',
+    'password strength check passed',
+    'Bearer of bad news',
+    'authorization failed for user',
+    'Tests: 42 passed, 0 failed',
+  ])('leaves ordinary output %j untouched', (input) => {
+    expect(maskTokenPatterns(input)).toBe(input);
+  });
+
+  it('collects values of newly covered names from the environment', () => {
+    const secrets = sensitiveEnvValues({ GH_PAT: 'pat-value-1234', PATH: '/usr/bin', STRIPE_KEY: 'sk_live_abcd' });
+    expect(secrets).toEqual(expect.arrayContaining(['pat-value-1234', 'sk_live_abcd']));
+    expect(secrets).not.toContain('/usr/bin');
+  });
+
+  it('does not treat shell navigation variables as secrets but still masks credential PWD segments', () => {
+    const secrets = sensitiveEnvValues({
+      PWD: '/workspace/project',
+      OLDPWD: '/workspace',
+      DB_PWD: 'db-password-value',
+    });
+
+    expect(secrets).toEqual(['db-password-value']);
+  });
+
+  it('still masks PWD name-value text as a conservative connection-string pattern', () => {
+    expect(maskTokenPatterns('PWD=/workspace/project')).toBe('PWD=***');
   });
 });

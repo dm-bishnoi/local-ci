@@ -192,3 +192,123 @@ describe('runStep', () => {
     expect(after).toBeLessThanOrEqual(before);
   });
 });
+
+/**
+ * F-2 regression: a step with bounded cleanup reports what it ran and printed
+ * even when it is stopped by a timeout or a cancellation.
+ */
+describe('runStep abort evidence', () => {
+  /** Honours its signal, then reports the evidence a real process step would. */
+  function cooperative(cleanupMs = 20): PipelineStep {
+    return {
+      id: 'coop',
+      name: 'Coop',
+      abortGraceMs: 2_000,
+      run: (context) =>
+        new Promise<StepResult>((resolve) => {
+          context.signal?.addEventListener('abort', () => {
+            setTimeout(
+              () =>
+                resolve({
+                  id: 'coop',
+                  name: 'Coop',
+                  status: 'CANCELLED',
+                  durationMs: 1,
+                  command: 'node script.js',
+                  exitCode: null,
+                  signal: 'SIGKILL',
+                  stdout: 'printed before the timeout',
+                  stderr: 'warning before the timeout',
+                  cancelled: true,
+                }),
+              cleanupMs,
+            );
+          });
+        }),
+    };
+  }
+
+  it('keeps command, exit details and output of a timed-out step', async () => {
+    const result = await runStep(cooperative(), makeContext(), { timeoutMs: 150 });
+
+    expect(result.status).toBe('FAIL');
+    expect(result.timedOut).toBe(true);
+    expect(result.cancelled).toBe(false);
+    expect(result.error).toBe('Step timed out after 150ms');
+    expect(result.command).toBe('node script.js');
+    expect(result.exitCode).toBeNull();
+    expect(result.signal).toBe('SIGKILL');
+    expect(result.stdout).toBe('printed before the timeout');
+    expect(result.stderr).toBe('warning before the timeout');
+  });
+
+  it('keeps the evidence of a cancelled step and still reports CANCELLED', async () => {
+    const controller = new AbortController();
+    const pending = runStep(cooperative(), makeContext({ signal: controller.signal }));
+    setTimeout(() => controller.abort(), 50);
+    const result = await pending;
+
+    expect(result.status).toBe('CANCELLED');
+    expect(result.cancelled).toBe(true);
+    expect(result.stdout).toBe('printed before the timeout');
+    expect(result.command).toBe('node script.js');
+  });
+
+  it('never lets an aborted step promote itself to PASS', async () => {
+    const liar: PipelineStep = {
+      id: 'liar',
+      name: 'Liar',
+      abortGraceMs: 1_000,
+      run: (context) =>
+        new Promise<StepResult>((resolve) => {
+          context.signal?.addEventListener('abort', () =>
+            resolve({ id: 'liar', name: 'Liar', status: 'PASS', durationMs: 0, stdout: 'all good' }),
+          );
+        }),
+    };
+    const result = await runStep(liar, makeContext(), { timeoutMs: 100 });
+
+    expect(result.status).toBe('FAIL');
+    expect(result.timedOut).toBe(true);
+    expect(result.stdout).toBe('all good');
+  });
+
+  it('waits for the step to finish cleaning up before returning', async () => {
+    let cleanedAt = 0;
+    const slowCleanup: PipelineStep = {
+      ...cooperative(),
+      run: (context) =>
+        new Promise<StepResult>((resolve) => {
+          context.signal?.addEventListener('abort', () => {
+            setTimeout(() => {
+              cleanedAt = Date.now();
+              resolve({ id: 'coop', name: 'Coop', status: 'CANCELLED', durationMs: 0 });
+            }, 300);
+          });
+        }),
+    };
+    const result = await runStep(slowCleanup, makeContext(), { timeoutMs: 100 });
+
+    expect(cleanedAt).toBeGreaterThan(0);
+    expect(Date.now()).toBeGreaterThanOrEqual(cleanedAt);
+    expect(result.durationMs).toBeGreaterThanOrEqual(350);
+  });
+
+  it('gives up after the grace period and says the output could not be captured', async () => {
+    const stuck: PipelineStep = {
+      id: 'stuck',
+      name: 'Stuck',
+      abortGraceMs: 200,
+      run: async () => new Promise<StepResult>(() => {}),
+    };
+    const started = Date.now();
+    const result = await runStep(stuck, makeContext(), { timeoutMs: 100 });
+
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(result.status).toBe('FAIL');
+    expect(result.timedOut).toBe(true);
+    expect(result.stdout).toBeUndefined();
+    expect(result.error).toContain('Step timed out after 100ms');
+    expect(result.error).toContain('could not be captured');
+  });
+});

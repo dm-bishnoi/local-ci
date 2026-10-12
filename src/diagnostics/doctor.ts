@@ -20,6 +20,7 @@ import { resolveStep, supportedStepIds } from '../adapters/angular/commands.js';
 import { requiredEnvironmentVariables } from '../config/schema.js';
 import { formatTimeout } from '../core/step-runner.js';
 import { collectProjectFacts, type ProjectFacts } from './facts.js';
+import { hasProjectScript } from './preflight.js';
 import type { Diagnostic } from './types.js';
 
 export interface DoctorOptions {
@@ -359,7 +360,24 @@ function pipelineDiagnostics(facts: ProjectFacts): Diagnostic[] {
   const known = new Set(supportedStepIds());
   const configured = config.pipeline;
 
+  // Steps the configuration scripts are implemented by the project's own script;
+  // the only question is whether that script exists.
   for (const stepId of configured) {
+    const scripted = config.steps?.[stepId];
+    if (scripted === undefined || (facts.angular !== null && hasProjectScript(facts.angular, scripted.script))) continue;
+    diagnostics.push({
+      id: `step:${stepId}`,
+      label: stepId,
+      severity: 'UNSUPPORTED',
+      category: 'pipeline',
+      detail: `package.json has no script named "${scripted.script}".`,
+      recommendation: `Add a "${scripted.script}" script to package.json, or fix the name under steps.${stepId} in .local-ci.yml.`,
+      steps: [stepId],
+    });
+  }
+
+  for (const stepId of configured) {
+    if (config.steps?.[stepId] !== undefined) continue;
     if (known.has(stepId)) continue;
 
     // An id outside the adapter vocabulary is UNSUPPORTED, not ERROR: it may
@@ -390,6 +408,7 @@ function pipelineDiagnostics(facts: ProjectFacts): Diagnostic[] {
   }
 
   for (const stepId of configured) {
+    if (config.steps?.[stepId] !== undefined) continue;
     if (!known.has(stepId)) continue;
     const resolved = resolveStep(stepId, facts.angular ?? { detected: false, framework: null, angularConfig: null, packageJson: null, packageManager: null, lockfile: null, packageManagerIsDefault: true, scripts: {}, dependencies: {}, devDependencies: {} });
     if (resolved?.status === 'unsupported') {

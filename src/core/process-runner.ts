@@ -186,8 +186,14 @@ export async function runProcess(
   let timedOut = false;
   let cancelled = false;
 
+  // Started at most once — a timeout and an abort can both fire — and awaited
+  // before this function resolves, so a caller never starts the next step while
+  // the previous tree is still shutting down.
+  let termination: Promise<boolean> | undefined;
   const terminate = (): void => {
-    void terminateTree(pid, terminator, options.forceKillAfterMs ?? FORCE_KILL_DELAY_MS);
+    termination ??= terminateTree(pid, terminator, options.forceKillAfterMs ?? FORCE_KILL_DELAY_MS).catch(
+      () => false,
+    );
   };
 
   if (options.timeoutMs !== undefined) {
@@ -213,6 +219,7 @@ export async function runProcess(
   } finally {
     stop.dispose();
   }
+  if (termination) await termination;
 
   // A terminated process has no exit status of its own.
   //
