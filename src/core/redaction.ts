@@ -35,14 +35,75 @@ const SENSITIVE_WORDS = [
   'PRIVATE_KEY',
   'SESSION',
   'COOKIE',
+  'CONNECTIONSTRING',
+  'CONNECTION_STRING',
+  'WEBHOOK',
 ] as const;
+
+/**
+ * Short words that are only sensitive as a whole name segment. Substring
+ * matching would mask `PATH` (for `PAT`) or `KEYBOARD` (for `KEY`); segment
+ * matching catches `GH_PAT`, `AZURE_DEVOPS_EXT_PAT`, `STRIPE_KEY`, `DB_PWD`.
+ */
+const SENSITIVE_SEGMENTS: ReadonlySet<string> = new Set(['PAT', 'KEY', 'PWD', 'PASS', 'DSN']);
 
 const SENSITIVE_FLAG = /^--?[a-z0-9-]*(token|secret|password|passwd|passphrase|credential|auth|api[-_]?key|[-_]?key)([=-]|$)/i;
 
 /** True when a name (env var or CLI flag) looks like it carries a credential. */
 export function isSensitiveName(name: string): boolean {
   const upper = name.toUpperCase();
-  return SENSITIVE_WORDS.some((word) => upper.includes(word));
+  if (SENSITIVE_WORDS.some((word) => upper.includes(word))) return true;
+  return upper.split(/[^A-Z0-9]+/).some((segment) => SENSITIVE_SEGMENTS.has(segment));
+}
+
+/**
+ * Credentials recognisable by their *format*, independent of any known value.
+ *
+ * Value-based masking only covers secrets this process can see in its own
+ * environment. A tool printing a token it read from `.npmrc`, a keychain or a
+ * config file gives nothing to match against. Each pattern here targets a
+ * documented token format or an unambiguous `name=value` credential syntax, so
+ * ordinary build output is not masked by accident.
+ */
+const TOKEN_PATTERNS: ReadonlyArray<{ pattern: RegExp; keep: (...groups: string[]) => string }> = [
+  // HTTP authorization headers, e.g. `Authorization: Bearer abc`, `authorization=Basic xyz`.
+  {
+    pattern: /\b(authorization\s*[:=]\s*)((?:bearer|basic|token)\s+)?[^\s"',;]+/gi,
+    keep: (prefix = '', scheme = '') => `${prefix}${scheme}`,
+  },
+  // A bare bearer credential, e.g. in a curl trace.
+  { pattern: /\b(bearer\s+)[A-Za-z0-9._~+/-]{16,}=*/gi, keep: (prefix = '') => prefix },
+  // JSON Web Tokens: three base64url segments, the first two always `eyJ`.
+  { pattern: /\beyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/g, keep: () => '' },
+  // GitHub tokens (classic, OAuth, user/server, refresh, fine-grained).
+  { pattern: /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g, keep: () => '' },
+  // npm automation/publish tokens.
+  { pattern: /\bnpm_[A-Za-z0-9]{30,}\b/g, keep: () => '' },
+  // `.npmrc` credentials: `//registry/:_authToken=...`, `_auth=...`, `_password=...`.
+  { pattern: /(_authToken|_auth|_password)(\s*=\s*)[^\s"']+/g, keep: (name = '', eq = '') => `${name}${eq}` },
+  // Slack tokens and AWS access key ids.
+  { pattern: /\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g, keep: () => '' },
+  { pattern: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, keep: () => '' },
+  // Key/value connection strings: `Password=...;`, `pwd=...`, `AccountKey=...`, `SharedAccessKey=...`.
+  {
+    pattern: /\b(password|pwd|accountkey|sharedaccesskey|sharedaccesssignature)(\s*=\s*)[^;\s"']+/gi,
+    keep: (name = '', eq = '') => `${name}${eq}`,
+  },
+];
+
+/**
+ * Masks credentials recognisable by format, keeping the label in front of the
+ * value (`Authorization: Bearer ***`) so a reader still knows what was there.
+ */
+export function maskTokenPatterns(text: string): string {
+  let output = text;
+  for (const { pattern, keep } of TOKEN_PATTERNS) {
+    output = output.replace(pattern, (_match, ...groups: unknown[]) => {
+      const captured = groups.slice(0, -2).map((group) => (typeof group === 'string' ? group : ''));
+      return `${keep(...captured)}${REDACTED}`;
+    });
+  }
+  return output;
 }
 
 /**

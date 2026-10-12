@@ -1,5 +1,5 @@
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { access, readFile } from 'node:fs/promises';
+import { dirname, join, relative, resolve } from 'node:path';
 
 /**
  * Angular project and package-manager detection.
@@ -102,16 +102,71 @@ function asRecord(value: unknown): Record<string, string> {
   return result;
 }
 
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function lockfileIn(dir: string): Promise<{ file: string; manager: PackageManager } | null> {
+  for (const entry of LOCKFILES) {
+    if (await exists(join(dir, entry.file))) return entry;
+  }
+  return null;
+}
+
+/** True when `dir` declares a workspace: `pnpm-workspace.yaml`, or `workspaces` in package.json. */
+async function declaresWorkspace(dir: string): Promise<boolean> {
+  if (await exists(join(dir, 'pnpm-workspace.yaml'))) return true;
+  const parsed = await readJson(join(dir, PACKAGE_JSON_FILE));
+  if ('error' in parsed) return false;
+  const value = parsed.value as { workspaces?: unknown } | null;
+  return typeof value === 'object' && value !== null && value.workspaces !== undefined;
+}
+
+/**
+ * Nearest ancestor of `cwd` that declares a workspace, searched no further
+ * than the enclosing git repository's root.
+ *
+ * Both limits are deliberate: an ancestor lockfile is only meaningful when that
+ * ancestor really is a workspace root, and a stray lockfile in a home directory
+ * or outside the repository must never decide how this project installs.
+ */
+export async function findWorkspaceRoot(cwd: string): Promise<string | null> {
+  let dir = resolve(cwd);
+  if (await pathExists(join(dir, '.git'))) return null;
+
+  for (;;) {
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+    if (await declaresWorkspace(dir)) return dir;
+    if (await pathExists(join(dir, '.git'))) return null;
+  }
+}
+
+/**
+ * Resolves the package manager from a lockfile in `cwd`, or — for a package
+ * inside a monorepo — from the lockfile at its workspace root. The returned
+ * `lockfile` is relative to `cwd`, so it reads naturally in messages.
+ */
 export async function detectPackageManager(cwd: string): Promise<{
   manager: PackageManager;
   lockfile: string | null;
   isDefault: boolean;
 }> {
-  for (const { file, manager } of LOCKFILES) {
-    if (await exists(join(cwd, file))) {
-      return { manager, lockfile: file, isDefault: false };
-    }
+  const local = await lockfileIn(cwd);
+  if (local) return { manager: local.manager, lockfile: local.file, isDefault: false };
+
+  const root = await findWorkspaceRoot(cwd);
+  const inherited = root ? await lockfileIn(root) : null;
+  if (root && inherited) {
+    return { manager: inherited.manager, lockfile: relative(cwd, join(root, inherited.file)), isDefault: false };
   }
+
   // npm ships with Node, so it is the only safe default when nothing is declared.
   return { manager: 'npm', lockfile: null, isDefault: true };
 }

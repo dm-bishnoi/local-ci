@@ -1,4 +1,4 @@
-name: CI and Linux Process-Tree Verification
+name: CI (Windows, macOS, Linux)
 
 on:
   workflow_dispatch:
@@ -12,15 +12,18 @@ permissions:
   contents: read
 
 jobs:
-  verify-linux-process-tree:
-    name: CI and Linux Process-Tree Verification
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  verify:
+    name: Verify (${{ matrix.os }}, Node ${{ matrix.node-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
 
     strategy:
       fail-fast: false
       matrix:
-        node-version: [20.x, 22.x]
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        # The test toolchain (vite 7) needs Node >= 20.19; the runtime floor
+        # (20.5.0) is verified separately by the engine-floor job below.
+        node-version: [20.x, 22.x, 24.x]
 
     steps:
       - name: Checkout repository
@@ -48,4 +51,82 @@ jobs:
         run: npm audit --omit=dev
 
       - name: Run Process-Tree Integration Tests (Timeout & Cancellation Grandchild Cleanup)
-        run: npx vitest run tests/core/process-tree.test.ts --reporter=verbose
+        run: npx vitest run tests/core/process-tree.test.ts tests/integration/timeout-evidence.test.ts --reporter=verbose
+
+  engine-floor:
+    # Proves the packed package runs on the lowest Node version package.json
+    # claims. Built on a current Node, then exercised as a black box on the
+    # floor version from a directory outside the repository.
+    name: Engine floor (${{ matrix.os }}, Node 20.5.0)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22.x for the build
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: 'npm'
+
+      - name: Build and pack
+        run: |
+          npm ci
+          npm run build
+          npm pack --pack-destination "$RUNNER_TEMP"
+
+      - name: Setup Node.js 20.5.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.5.0
+
+      - name: Smoke-test the packed CLI on Node 20.5.0
+        run: |
+          set -euo pipefail
+          node --version
+          TOOL="$RUNNER_TEMP/tool"
+          FIXTURE="$RUNNER_TEMP/fixture"
+          mkdir -p "$TOOL" "$FIXTURE/node_modules/placeholder"
+          npm install --prefix "$TOOL" --no-audit --no-fund "$RUNNER_TEMP"/dm-bishnoi-local-ci-runner-*.tgz
+          CLI="$TOOL/node_modules/.bin/local-ci-runner"
+
+          cd "$FIXTURE"
+          echo '{}' > node_modules/placeholder/package.json
+          cat > package.json <<'EOF'
+          {
+            "name": "engine-floor-fixture",
+            "private": true,
+            "dependencies": { "@angular/core": "^19.0.0" },
+            "scripts": {
+              "build": "node -e \"console.log('built')\"",
+              "test": "node -e \"process.exit(3)\""
+            }
+          }
+          EOF
+
+          "$CLI" --version
+          "$CLI" init
+          test -f .local-ci/.gitignore
+          printf 'version: 1\nproject:\n  type: angular\npipeline:\n  - build\nsettings:\n  timeoutMs: 60000\n' > .local-ci.yml
+          "$CLI" validate
+          "$CLI" run
+
+          printf 'version: 1\nproject:\n  type: angular\npipeline:\n  - build\n  - test\n' > .local-ci.yml
+          set +e
+          "$CLI" run
+          code=$?
+          set -e
+          test "$code" -eq 1
+          test ! -f package-lock.json
+          ls .local-ci/reports/*/report.json .local-ci/reports/*/report.html

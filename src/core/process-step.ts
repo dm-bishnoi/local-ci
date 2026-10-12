@@ -24,6 +24,16 @@ export interface ProcessStepOptions {
 }
 
 /**
+ * How long the step runner waits, after a timeout or cancellation, for the
+ * process to be terminated and its captured output returned.
+ *
+ * Process termination is itself bounded (a polite kill, a grace period, then a
+ * forced kill), so in practice this returns in well under a second; the cap
+ * only matters if a descendant escapes the tree kill and keeps stdio open.
+ */
+export const PROCESS_ABORT_GRACE_MS = 15_000;
+
+/**
  * Builds a framework-agnostic {@link PipelineStep} backed by a single child
  * process. This is the generic bridge between the execution engine and any
  * adapter: adapters describe *which* command to run, this factory describes
@@ -38,6 +48,9 @@ export function createProcessStep(options: ProcessStepOptions): PipelineStep {
   return {
     id: options.id,
     name: options.name ?? options.id,
+    abortGraceMs: PROCESS_ABORT_GRACE_MS,
+    // The runner enforces the limit too, so it must see the step's own value.
+    ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
     async run(context: PipelineContext): Promise<StepResult> {
       const execute = options.exec ?? runProcess;
       const result = await execute(options.command, args, {

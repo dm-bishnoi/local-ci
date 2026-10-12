@@ -6,7 +6,7 @@ Run configured Angular CI checks locally before pushing, with preflight diagnost
 
 Local CI Runner is an npm CLI with a framework-agnostic core and framework adapters.
 
-**Current support:** the built-in project adapter targets Angular. Generic Node.js/pnpm project detection and GitHub Actions YAML execution are not included in version 0.1.x.
+**Current support:** the built-in project adapter targets Angular. Any other project can run its own `package.json` scripts through the `steps` section (see below). Generic Node.js/pnpm project detection and GitHub Actions YAML execution are not included in version 0.1.x.
 
 ## Phase 4.5 status
 
@@ -123,7 +123,17 @@ Resolved from the lockfile, in this fixed order:
 | `pnpm-lock.yaml` | pnpm |
 | `yarn.lock` | yarn |
 
-With no lockfile, npm is used and the run reports that the choice was a default.
+For a package inside a monorepo with no lockfile of its own, the lockfile at the
+workspace root is used. An ancestor counts as a workspace root only if it declares
+one (`pnpm-workspace.yaml`, or `workspaces` in its `package.json`), and the search
+never goes past the enclosing git repository.
+
+With no lockfile anywhere, npm is used and the run reports that the choice was a
+default. In that case the `install` step is **BLOCKED**: installing without a
+lockfile would create one and could resolve different versions than CI, and a local
+check must not quietly change the project it is checking. Commit a lockfile, or
+remove `install` from the pipeline and install dependencies yourself.
+
 The adapter never installs or switches package managers, and never falls back
 to a different one: if the detected manager is unavailable the step fails.
 
@@ -211,6 +221,16 @@ npx @dm-bishnoi/local-ci-runner init
 npx @dm-bishnoi/local-ci-runner run
 ```
 
+`init` also creates `.local-ci/.gitignore` (containing `*`), so stored reports stay
+out of version control. Your own `.gitignore` is never edited. `run` creates the same
+file if it is missing, and never overwrites one that exists.
+
+When working on this repository itself, run the CLI with `node dist/cli/index.js` or
+`npm run dev`. `npx --package=@dm-bishnoi/local-ci-runner@<this version>` from
+*inside* the repository finds the repository's own package.json, installs nothing,
+and reports `local-ci-runner` as not found. That is npm's behaviour, not a packaging
+fault; run it from any other directory.
+
 ## Configuration
 
 Create `.local-ci.yml`:
@@ -259,12 +279,65 @@ recommendation can tell you to copy the example. Its values are discarded on rea
 
 ### settings.timeoutMs
 
-Optional per-step time limit in milliseconds. Omit it to run steps without a time
-limit. When the limit is reached the child process is terminated, the step fails with
+Optional per-step time limit in milliseconds, at most 24 hours. **When omitted, `run`
+applies a default of 30 minutes (1800000 ms)**, so no step can hang indefinitely;
+`validate` prints the effective timeout and whether it is the default. When the
+limit is reached the whole process tree is terminated, the step fails with
 `timedOut: true`, and the error states the limit, e.g. `Step timed out after 300s`.
+
+A timed-out step keeps its evidence: the command line, and everything it printed
+before the timeout, are in `report.json`, `report.html` and its log. The next step
+starts only after the timed-out process tree has exited.
 
 A timeout fails the step. It is never reported as a pass, and it is never silently
 converted into a generic failure.
+
+### steps
+
+Run a project script as a pipeline step. This is how a non-Angular project (any
+`project.type`) is checked, and how an Angular project adds a step the adapter does
+not know (such as `e2e`) or points a built-in step at a different script.
+
+```yaml
+project:
+  type: node
+pipeline:
+  - lint
+  - test
+  - e2e
+steps:
+  lint:
+    script: lint
+  test:
+    script: test
+  e2e:
+    script: "test:e2e"
+    timeoutMs: 600000      # optional; overrides settings.timeoutMs for this step
+```
+
+- Each key under `steps` must also be listed in `pipeline`.
+- `script` is the name of a script in `package.json`. It runs as `npm run <script>`
+  (`pnpm run` / `yarn run`, following your lockfile) with no shell string built by
+  local-ci-runner. Names may use letters, digits and `: . _ / -`, and must start with a
+  letter or digit.
+- Nothing else is accepted: no `command`, `args`, `env` or `cwd`. An unknown key is an
+  error, as everywhere else in the file.
+- A `steps` entry replaces the built-in implementation of the same id. Angular steps
+  you do not script behave exactly as before.
+- A script that is missing or empty in `package.json` reports `UNSUPPORTED` and exits
+  non-zero; nothing is launched. `doctor` and `preflight` flag it first.
+- Exit codes, timeouts, cancellation, process-tree cleanup, secret masking, logs and
+  the JSON/HTML reports are the same as for every other step, and `failFast` applies.
+- The scripts run with your project's trust: `.local-ci.yml` can only choose among
+  scripts that `package.json` already defines, so a configuration file cannot start an
+  arbitrary program.
+
+### Unknown keys
+
+Every section of `.local-ci.yml` is strict: an unrecognised key is an error that names
+the key and where it is (for example `settings: Unrecognized key: "timeoutms"`). A
+misspelled setting therefore fails `validate` and `run` instead of being silently
+ignored.
 
 ## Pipeline execution lifecycle
 
@@ -411,11 +484,21 @@ is a warning or unknown, not a pass.
 
 ## Node version requirements
 
-`engines.node` and `.nvmrc` are checked with a deliberately small range checker (no
-semver dependency). Supported: comparators like `>=20`, `>=18 <21`, `20.x`, exact
-versions. A range the checker cannot evaluate with confidence is reported as
-`UNKNOWN` with guidance to verify manually — local-ci does not claim compatibility it
-could not check.
+local-ci-runner itself requires Node.js 20.5.0 or later (the minimum its process
+runner, execa, supports). CI runs the full suite on Windows, macOS and Linux with Node
+20.x, 22.x and 24.x, and smoke-tests the packed CLI on exactly Node 20.5.0.
+
+For the project being checked, `engines.node` and `.nvmrc` are checked with a
+deliberately small range checker (no semver dependency). A range is alternatives
+separated by `||`; each alternative is comparators that must all hold, separated by
+whitespace or commas. Supported comparators: `>=`, `>`, `<=`, `<`, `=`, exact and
+partial versions (`20.11.0`, `20`), x-ranges (`20.x`, `*`), caret (`^18.19.0`) and tilde
+(`~18.19.0`). Whitespace after an operator is fine: `>= 18` means `>=18`.
+
+A range the checker cannot evaluate with confidence (dist-tags such as `lts/*`,
+hyphen ranges, text) is reported as `UNKNOWN` with guidance to verify manually —
+local-ci does not claim compatibility it could not check, and an unreadable part of a
+range is never treated as satisfied.
 
 ## Process-tree cleanup
 
@@ -437,7 +520,10 @@ than guessed.
 
 ## Known limitations
 
-- Only Angular projects have an adapter. Other frameworks report `UNSUPPORTED`.
+- Only Angular projects have a built-in adapter. Other projects run through the `steps`
+  section; steps they do not script report `UNSUPPORTED`.
+- `steps` runs `package.json` scripts only: there is no arbitrary `command`, no `args` and
+  no per-step working directory yet. Run the CLI from the package directory in a monorepo.
 - The range checker covers a subset of semver syntax; anything else is `UNKNOWN`.
 - Browser detection checks known install locations; a browser installed elsewhere is
   not found (and is reported as such, never as a pass).
@@ -633,7 +719,18 @@ that states plainly that they did not run.
   no command string is built from configuration values.
 - Captured output is truncated and masked: values of environment variables whose names
   look like credentials, and values passed to credential-style flags such as `--token`,
-  are replaced with `***`.
+  are replaced with `***`. Names match on words such as `TOKEN`, `SECRET`, `PASSWORD`,
+  `AUTH`, `CONNECTION_STRING` and `WEBHOOK`, and on whole name segments `PAT`, `KEY`,
+  `PWD`, `PASS` and `DSN` (so `GH_PAT`, `AZURE_DEVOPS_EXT_PAT` and `STRIPE_KEY` are
+  masked while `PATH` and `KEYBOARD_LAYOUT` are not).
+- Credentials with a recognisable *format* are masked even when no environment
+  variable reveals them: `Authorization:` header values, `Bearer` tokens, JWTs, GitHub
+  (`ghp_…`, `github_pat_…`) and npm (`npm_…`) tokens, `.npmrc` `_authToken=` values,
+  Slack tokens, AWS access key ids, and `Password=` / `AccountKey=` values in
+  connection strings.
+- Reports live under `.local-ci/`, which ignores itself through `.local-ci/.gitignore`.
+  Masking is a safety net, not a guarantee — a secret printed in an unrecognised form
+  is not masked — so stored reports are kept out of version control as well.
 - Passwords embedded in URLs are masked structurally. A tool that prints
   `postgres://admin:s3cr3t@db.internal` has told us nothing to match against, but
   userinfo is a defined part of the URL grammar, so the password is masked while

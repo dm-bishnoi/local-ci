@@ -35,6 +35,12 @@ export interface TreeTerminator {
   readonly canKillTree: boolean;
   /** Short human-readable description of the mechanism, for diagnostics. */
   readonly description: string;
+  /**
+   * True while any process of the tree rooted at `pid` may still be running.
+   * Optional: without it, termination always waits out the grace period and
+   * escalates, which is the conservative behaviour.
+   */
+  isAlive?(pid: number): boolean;
 }
 
 /** Converts TreeSignal shorthand ('TERM' / 'KILL') to Node-compatible POSIX signal strings. */
@@ -70,6 +76,11 @@ const windowsTerminator: TreeTerminator = {
       }
     });
   },
+  // `taskkill /T /F` is already forceful and walks the tree before it returns,
+  // so the root pid is the meaningful liveness signal here.
+  isAlive(pid: number): boolean {
+    return processIsAlive(pid);
+  },
 };
 
 /**
@@ -97,6 +108,17 @@ const posixTerminator: TreeTerminator = {
         }
       }
     });
+  },
+  // Signal 0 to the negated pid probes the whole group: any surviving member
+  // keeps the group alive, which is exactly the leak this module prevents.
+  isAlive(pid: number): boolean {
+    try {
+      process.kill(-pid, 0);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EPERM') return true;
+      return processIsAlive(pid);
+    }
   },
 };
 
@@ -130,8 +152,31 @@ export async function terminateTree(
   const polite = await terminator.kill(pid, 'TERM');
   if (!polite) return false;
 
-  await new Promise((resolve) => setTimeout(resolve, forceAfterMs));
+  // When the terminator can observe the tree, stop waiting the moment it is
+  // gone instead of always paying the full grace period. Callers await this
+  // promise before starting new work, so the wait is on the critical path.
+  if (terminator.isAlive) {
+    const deadline = Date.now() + forceAfterMs;
+    while (Date.now() < deadline) {
+      if (!safeIsAlive(terminator, pid)) return true;
+      await new Promise((resolve) => setTimeout(resolve, TERMINATION_POLL_MS));
+    }
+    if (!safeIsAlive(terminator, pid)) return true;
+  } else {
+    await new Promise((resolve) => setTimeout(resolve, forceAfterMs));
+  }
   return terminator.kill(pid, 'KILL');
+}
+
+const TERMINATION_POLL_MS = 50;
+
+/** A liveness probe that throws is treated as "still alive", so escalation still happens. */
+function safeIsAlive(terminator: TreeTerminator, pid: number): boolean {
+  try {
+    return terminator.isAlive?.(pid) ?? true;
+  } catch {
+    return true;
+  }
 }
 
 /** True when a pid names a process that currently exists. */
