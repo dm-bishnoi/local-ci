@@ -45,7 +45,11 @@ const SENSITIVE_WORDS = [
  * matching would mask `PATH` (for `PAT`) or `KEYBOARD` (for `KEY`); segment
  * matching catches `GH_PAT`, `AZURE_DEVOPS_EXT_PAT`, `STRIPE_KEY`, `DB_PWD`.
  */
-const SENSITIVE_SEGMENTS: ReadonlySet<string> = new Set(['PAT', 'KEY', 'PWD', 'PASS', 'DSN']);
+const SENSITIVE_SEGMENTS: ReadonlySet<string> = new Set(['PAT', 'KEY', 'PASS', 'DSN']);
+
+// Standard shell navigation variables, not credentials. Keep PWD/OLDPWD out
+// of value-based masking while retaining DB_PWD and similar credential names.
+const NON_SECRET_SHELL_SEGMENTS: ReadonlySet<string> = new Set(['PWD', 'OLDPWD']);
 
 const SENSITIVE_FLAG = /^--?[a-z0-9-]*(token|secret|password|passwd|passphrase|credential|auth|api[-_]?key|[-_]?key)([=-]|$)/i;
 
@@ -53,7 +57,9 @@ const SENSITIVE_FLAG = /^--?[a-z0-9-]*(token|secret|password|passwd|passphrase|c
 export function isSensitiveName(name: string): boolean {
   const upper = name.toUpperCase();
   if (SENSITIVE_WORDS.some((word) => upper.includes(word))) return true;
-  return upper.split(/[^A-Z0-9]+/).some((segment) => SENSITIVE_SEGMENTS.has(segment));
+  const segments = upper.split(/[^A-Z0-9]+/);
+  if (segments.length === 1 && NON_SECRET_SHELL_SEGMENTS.has(upper)) return false;
+  return segments.some((segment) => SENSITIVE_SEGMENTS.has(segment));
 }
 
 /**
