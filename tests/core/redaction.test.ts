@@ -102,7 +102,7 @@ describe('redaction coverage (F-1)', () => {
     expect(isSensitiveName(name)).toBe(true);
   });
 
-  it.each(['PATH', 'PATHEXT', 'KEYBOARD_LAYOUT', 'MONKEY_MODE', 'COMPASS', 'NODE_ENV', 'CI'])(
+  it.each(['PATH', 'PATHEXT', 'KEYBOARD_LAYOUT', 'MONKEY_MODE', 'COMPASS', 'NODE_ENV', 'CI', 'PWD', 'OLDPWD', 'pwd'])(
     'does not treat %s as sensitive',
     (name) => {
       expect(isSensitiveName(name)).toBe(false);
@@ -143,5 +143,19 @@ describe('redaction coverage (F-1)', () => {
     const secrets = sensitiveEnvValues({ GH_PAT: 'pat-value-1234', PATH: '/usr/bin', STRIPE_KEY: 'sk_live_abcd' });
     expect(secrets).toEqual(expect.arrayContaining(['pat-value-1234', 'sk_live_abcd']));
     expect(secrets).not.toContain('/usr/bin');
+  });
+
+  it('does not treat shell navigation variables as secrets but still masks credential PWD segments', () => {
+    const secrets = sensitiveEnvValues({
+      PWD: '/workspace/project',
+      OLDPWD: '/workspace',
+      DB_PWD: 'db-password-value',
+    });
+
+    expect(secrets).toEqual(['db-password-value']);
+  });
+
+  it('still masks PWD name-value text as a conservative connection-string pattern', () => {
+    expect(maskTokenPatterns('PWD=/workspace/project')).toBe('PWD=***');
   });
 });
