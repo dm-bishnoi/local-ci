@@ -3,6 +3,7 @@ import { prepareRunStep, type PrepareOptions } from '../core/run-step.js';
 import type { Diagnostic } from '../diagnostics/types.js';
 import { satisfies } from '../env/semver.js';
 import { probeExecutable, probeTool, type ProbeResult } from '../env/tools.js';
+import { discoverProjects } from './discovery.js';
 import { qualifiedPipeline, scriptCapabilityFor, type ProjectPlan } from './plan.js';
 import { unrecognisedTypeWarning } from './registry.js';
 import type { Capability } from './types.js';
@@ -49,6 +50,8 @@ export async function runStepDiagnostic(input: {
 
 export interface EcosystemDiagnosticOptions {
   skipToolProbes?: boolean;
+  /** `doctor` only: also list what every project could run, whether or not the pipeline asks for it. */
+  capabilitySummary?: boolean;
   /** Substitutes the tool probe. Used by tests. */
   probe?: (name: string, args?: readonly string[], locateOnly?: boolean, env?: Record<string, string>) => Promise<ProbeResult>;
 }
@@ -396,6 +399,77 @@ async function stepDiagnostics(plan: ProjectPlan): Promise<Diagnostic[]> {
   return diagnostics;
 }
 
+/** One line per project: what it can run (and from what evidence), and what it cannot (and why). */
+function capabilitySummary(plan: ProjectPlan): Diagnostic {
+  const available: string[] = [];
+  const unavailable: string[] = [];
+  for (const [stepId, capability] of Object.entries(plan.detection?.capabilities ?? {})) {
+    if (capability.state === 'available') {
+      available.push(`${stepId} (${capability.source}${capability.evidence ? `: ${capability.evidence}` : ''})`);
+    } else {
+      unavailable.push(`${stepId} (${capability.reason})`);
+    }
+  }
+  const parts = [`Available: ${available.length > 0 ? available.join('; ') : 'none'}.`];
+  if (unavailable.length > 0) parts.push(`Not available: ${unavailable.join('; ')}`);
+  return {
+    id: id(plan, 'capabilities'),
+    label: `${label(plan)}: capabilities`,
+    severity: 'PASS',
+    category: 'pipeline',
+    detail: parts.join(' '),
+  };
+}
+
+/**
+ * Cross-checks the configuration against what is actually in the repository, so a
+ * project the pipeline does not cover is mentioned rather than silently absent.
+ * Silent when there is nothing to report.
+ */
+export async function discoveryDiagnostics(
+  root: string,
+  configured: ReadonlyArray<{ path: string; ecosystem: string | undefined }>,
+): Promise<Diagnostic[]> {
+  const found = await discoverProjects(root);
+  const diagnostics: Diagnostic[] = [];
+
+  const normalize = (path: string): string => path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '') || '.';
+  const covered = (project: { path: string; ecosystem: string }): boolean =>
+    configured.some((entry) => normalize(entry.path) === project.path && (entry.ecosystem === undefined || entry.ecosystem === project.ecosystem));
+
+  const missing = found.projects.filter((project) => !covered(project));
+  if (missing.length > 0) {
+    diagnostics.push({
+      id: 'discovery:unconfigured',
+      label: 'Projects not in the configuration',
+      severity: 'WARNING',
+      category: 'configuration',
+      detail: `Found project(s) that .local-ci.yml does not run: ${missing.map((p) => `${p.path} (${p.type})`).join(', ')}.`,
+      recommendation: 'Add them under projects:, or run "local-ci-runner init --all --dry-run" to see a configuration that covers them.',
+    });
+  }
+  if (found.skipped.depthLimited.length > 0) {
+    diagnostics.push({
+      id: 'discovery:depth',
+      label: 'Project discovery',
+      severity: 'WARNING',
+      category: 'configuration',
+      detail: `Directories below ${found.skipped.depthLimited.map((p) => `"${p}"`).join(', ')} were not scanned (depth limit), so projects there would not be listed.`,
+      recommendation: 'Raise the limit with "local-ci-runner init --dry-run --scan-depth N" to see what is deeper.',
+    });
+  }
+  for (const [index, warning] of found.warnings.entries()) {
+    diagnostics.push({
+      id: `discovery:note:${index + 1}`,
+      label: 'Project discovery',
+      severity: 'WARNING',
+      category: 'configuration',
+      detail: warning,
+    });
+  }
+  return diagnostics;
+}
+
 export async function ecosystemDiagnostics(
   plans: readonly ProjectPlan[],
   config: LocalCiConfig,
@@ -452,6 +526,7 @@ export async function ecosystemDiagnostics(
       }
     }
 
+    if (options.capabilitySummary) diagnostics.push(capabilitySummary(plan));
     diagnostics.push(...nodeRuntimeDiagnostics(plan));
     diagnostics.push(...(await toolDiagnostics(plan, options)));
     const steps = await stepDiagnostics(plan);

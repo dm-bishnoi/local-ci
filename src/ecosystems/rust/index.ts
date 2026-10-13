@@ -142,9 +142,17 @@ async function detect(dir: string, options: DetectOptions = {}): Promise<RustDet
     members: workspaceBody ? stringList(workspaceBody, 'members') : [],
     toolchainFile,
   };
+  const warnings: string[] = [];
   if (!lockfile) {
-    detection.warnings = ['No Cargo.lock was found, so --locked is not used and cargo will create one in the project. Commit a Cargo.lock for reproducible runs.'];
+    warnings.push('No Cargo.lock was found, so --locked is not used and cargo will create one in the project. Commit a Cargo.lock for reproducible runs.');
   }
+  if (toolchainFile) {
+    warnings.push(
+      `${toolchainFile} pins the toolchain. rustup uses it, and a toolchain that is not installed is not downloaded (RUSTUP_AUTO_INSTALL=0): ` +
+        'install it yourself with "rustup toolchain install" if cargo reports it missing.',
+    );
+  }
+  if (warnings.length > 0) detection.warnings = warnings;
   detection.capabilities = Object.fromEntries(STEP_IDS.map((id) => [id, resolveRust(id, detection, options)]));
   return detection;
 }

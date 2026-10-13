@@ -21,7 +21,8 @@ import { requiredEnvironmentVariables } from '../config/schema.js';
 import { formatTimeout } from '../core/step-runner.js';
 import { collectProjectFacts, type ProjectFacts } from './facts.js';
 import { isRunStep } from '../config/schema.js';
-import { ecosystemDiagnostics, runStepDiagnostic } from '../ecosystems/diagnostics.js';
+import { discoveryDiagnostics, ecosystemDiagnostics, runStepDiagnostic } from '../ecosystems/diagnostics.js';
+import { adapterFor } from '../ecosystems/registry.js';
 import { hasProjectScript } from './preflight.js';
 import type { Diagnostic } from './types.js';
 
@@ -570,12 +571,17 @@ export async function runDoctorChecks(cwd: string, options: DoctorOptions = {}):
         detail: `Valid configuration with ${facts.plans.length} project(s) and ${facts.config.config.pipeline.length} pipeline step(s).`,
       },
       ...(await ecosystemDiagnostics(facts.plans, facts.config.config, env, {
+        capabilitySummary: true,
         ...(options.skipToolProbes !== undefined ? { skipToolProbes: options.skipToolProbes } : {}),
       })),
+      ...(await discoveryDiagnostics(
+        facts.cwd,
+        facts.plans.map((plan) => ({ path: plan.project.path, ecosystem: plan.adapter?.id })),
+      )),
     ];
   }
 
-  return [
+  const legacy = [
     osDiagnostic,
     runtimeDiagnostic(facts),
     ...toolDiagnostics,
@@ -584,6 +590,15 @@ export async function runDoctorChecks(cwd: string, options: DoctorOptions = {}):
     ...(await pipelineDiagnostics(facts)),
     ...environmentVariableDiagnostics(facts, env),
   ];
+
+  // The original single-project path also learns about projects it does not cover.
+  const configured = facts.config.config;
+  if (configured !== null) {
+    legacy.push(
+      ...(await discoveryDiagnostics(facts.cwd, [{ path: '.', ecosystem: adapterFor(configured.project.type)?.id }])),
+    );
+  }
+  return legacy;
 }
 
 /** Absolute path of a project file, for diagnostics that mention one. */
