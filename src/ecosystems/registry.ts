@@ -16,3 +16,16 @@ export function adapterFor(type: string): EcosystemAdapter | undefined {
 export function knownProjectTypes(): string[] {
   return ADAPTERS.flatMap((adapter) => [...adapter.profiles]).sort();
 }
+
+/**
+ * Warning for a `project.type` no adapter handles. Such a configuration keeps
+ * working exactly as in 0.2.x (only `steps:` entries run, every other step is
+ * UNSUPPORTED); this just says so instead of leaving the user to find out.
+ */
+export function unrecognisedTypeWarning(type: string): string | null {
+  if (type === 'multi' || adapterFor(type)) return null;
+  return (
+    `project.type "${type}" is not a recognised ecosystem, so only "steps:" entries will run and every other ` +
+    `step reports UNSUPPORTED. Known types: ${knownProjectTypes().join(', ')}.`
+  );
+}
