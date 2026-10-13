@@ -1,8 +1,9 @@
 import { join } from 'node:path';
 import { findWorkspaceRoot } from '../adapters/angular/detect.js';
 import { normalizeProjects, qualifyStepId, resolveProjectDir, type ConfiguredProject } from '../config/projects.js';
-import type { LocalCiConfig } from '../config/schema.js';
+import { isRunStep, type LocalCiConfig } from '../config/schema.js';
 import type { ProcessExecutor } from '../core/process-runner.js';
+import { createRunStep } from '../core/run-step.js';
 import { createMissingScriptStep, createScriptStep } from '../core/script-step.js';
 import { StepRegistry } from '../core/step-runner.js';
 import { listDir } from './fs.js';
@@ -153,6 +154,19 @@ export function buildProjectRegistry(
       }
 
       const scripted = Object.hasOwn(project.steps, id) ? project.steps[id] : undefined;
+
+      if (scripted !== undefined && isRunStep(scripted)) {
+        registry.register(
+          createRunStep({
+            id: qid,
+            name,
+            definition: scripted,
+            projectDir: plan.dir,
+            ...(options.exec !== undefined ? { exec: options.exec } : {}),
+          }),
+        );
+        continue;
+      }
 
       if (scripted !== undefined) {
         const host = plan.scriptHost;

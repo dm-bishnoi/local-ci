@@ -109,6 +109,85 @@ export const projectPathSchema = z
   )
   .refine((value) => !value.split(/[\\/]/).includes('..'), "must not contain a '..' segment");
 
+/** Executable names resolved from PATH: no separators, no leading '-' or '.'. */
+export const BARE_EXECUTABLE = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/;
+
+/**
+ * A custom command, given as an argument vector and never as a shell string.
+ *
+ * `run[0]` is either a bare executable name (looked up on PATH) or a path
+ * inside the project (`./tools/check`, `scripts\lint.cmd`). The vector goes
+ * to the operating system as-is: no shell, no quoting, no expansion. Further
+ * containment and Windows batch-file checks need the file system and happen
+ * when the step is prepared (see core/run-step.ts).
+ */
+export const runStepSchema = z
+  .object({
+    run: z
+      .array(z.string().max(4096))
+      .min(1)
+      .max(64)
+      .superRefine((argv, context) => {
+        // `.min(1)` reports the empty case, but refinements still run after it.
+        if (argv.length === 0) return;
+        const exe = argv[0]!;
+        const nul = String.fromCharCode(0);
+        if (exe.length === 0) {
+          context.addIssue({ code: 'custom', path: [0], message: 'the executable must not be empty' });
+        } else if (/[\r\n]/.test(exe) || exe.includes(nul)) {
+          context.addIssue({ code: 'custom', path: [0], message: 'the executable must not contain control characters' });
+        } else if (!/[\\/]/.test(exe)) {
+          if (!BARE_EXECUTABLE.test(exe)) {
+            context.addIssue({
+              code: 'custom',
+              path: [0],
+              message: 'a bare executable name may contain letters, digits and . _ + - only (use a project-relative path otherwise)',
+            });
+          }
+        } else if (/^([A-Za-z]:|[\\/])/.test(exe) || exe.split(/[\\/]/).includes('..')) {
+          context.addIssue({
+            code: 'custom',
+            path: [0],
+            message: 'an executable path must be relative to the project (no absolute path, drive letter, UNC path or ".." segment)',
+          });
+        }
+        argv.forEach((arg, index) => {
+          if (arg.includes(nul)) context.addIssue({ code: 'custom', path: [index], message: 'must not contain NUL' });
+        });
+      }),
+    /** Working directory, relative to the project directory. */
+    cwd: projectPathSchema.optional(),
+    /** Overrides settings.timeoutMs (and the default) for this step only. */
+    timeoutMs: z.number().int().positive().max(MAX_TIMEOUT_MS).optional(),
+  })
+  .strict();
+
+/** A step is implemented either by a package.json script or by a custom command. */
+export type ScriptStepDefinition = z.infer<typeof scriptStepSchema>;
+export type RunStepDefinition = z.infer<typeof runStepSchema>;
+export type StepDefinition = ScriptStepDefinition | RunStepDefinition;
+
+/**
+ * Chooses the schema by the key the author wrote (`run` or not) instead of using
+ * a plain union, so an error points at the offending field ("steps.lint.script")
+ * rather than at an opaque "Invalid input" on the whole step.
+ */
+export const stepDefinitionSchema = z.unknown().transform((value, context): StepDefinition => {
+  const isRun = typeof value === 'object' && value !== null && Object.hasOwn(value, 'run');
+  const parsed = (isRun ? runStepSchema : scriptStepSchema).safeParse(value);
+  if (parsed.success) return parsed.data;
+  for (const issue of parsed.error.issues) {
+    // Re-emit the original issue (code, keys, path) so callers see exactly what the
+    // owning schema reported.
+    context.addIssue(issue as unknown as Parameters<typeof context.addIssue>[0]);
+  }
+  return z.NEVER;
+});
+
+export function isRunStep(definition: StepDefinition): definition is RunStepDefinition {
+  return 'run' in definition;
+}
+
 const projectTypeSchema = z.string().min(1);
 
 /** Step ids inside a `projects:` entry may not contain '.', which separates project and step. */
@@ -120,7 +199,7 @@ export const projectNameSchema = z
   .max(64)
   .regex(/^[a-zA-Z0-9_-]+$/, 'must contain only letters, digits, underscore and hyphen');
 
-const stepsSchema = z.record(pipelineStepIdSchema, scriptStepSchema);
+const stepsSchema = z.record(pipelineStepIdSchema, stepDefinitionSchema);
 
 const projectEntrySchema = z
   .object({
@@ -128,7 +207,7 @@ const projectEntrySchema = z
     type: projectTypeSchema,
     path: projectPathSchema.optional(),
     pipeline: z.array(projectStepIdSchema).min(1),
-    steps: z.record(projectStepIdSchema, scriptStepSchema).optional(),
+    steps: z.record(projectStepIdSchema, stepDefinitionSchema).optional(),
   })
   .strict();
 
@@ -218,7 +297,7 @@ export interface LocalCiConfig {
   projects?: ProjectEntry[];
   pipeline: string[];
   settings: z.infer<typeof settingsSchema>;
-  steps?: Record<string, z.infer<typeof scriptStepSchema>>;
+  steps?: Record<string, StepDefinition>;
   environment?: z.infer<typeof environmentSchema>;
 }
 
@@ -228,7 +307,7 @@ function flatten(raw: RawConfig): LocalCiConfig {
     return { ...rest, project: project!, pipeline: pipeline!, ...(steps !== undefined ? { steps } : {}) };
   }
 
-  const flatSteps: Record<string, z.infer<typeof scriptStepSchema>> = {};
+  const flatSteps: Record<string, StepDefinition> = {};
   const flatPipeline: string[] = [];
   for (const entry of projects) {
     for (const id of entry.pipeline) flatPipeline.push(`${entry.name}.${id}`);

@@ -20,7 +20,8 @@ import { resolveStep, supportedStepIds } from '../adapters/angular/commands.js';
 import { requiredEnvironmentVariables } from '../config/schema.js';
 import { formatTimeout } from '../core/step-runner.js';
 import { collectProjectFacts, type ProjectFacts } from './facts.js';
-import { ecosystemDiagnostics } from '../ecosystems/diagnostics.js';
+import { isRunStep } from '../config/schema.js';
+import { ecosystemDiagnostics, runStepDiagnostic } from '../ecosystems/diagnostics.js';
 import { hasProjectScript } from './preflight.js';
 import type { Diagnostic } from './types.js';
 
@@ -353,7 +354,7 @@ function projectDiagnostics(facts: ProjectFacts): Diagnostic[] {
   return diagnostics;
 }
 
-function pipelineDiagnostics(facts: ProjectFacts): Diagnostic[] {
+async function pipelineDiagnostics(facts: ProjectFacts): Promise<Diagnostic[]> {
   const config = facts.config.config;
   if (!config) return [];
 
@@ -365,6 +366,18 @@ function pipelineDiagnostics(facts: ProjectFacts): Diagnostic[] {
   // the only question is whether that script exists.
   for (const stepId of configured) {
     const scripted = config.steps?.[stepId];
+    if (scripted !== undefined && isRunStep(scripted)) {
+      const problem = await runStepDiagnostic({
+        id: `step:${stepId}`,
+        label: stepId,
+        qid: stepId,
+        stepId,
+        definition: scripted,
+        projectDir: facts.cwd,
+      });
+      if (problem) diagnostics.push(problem);
+      continue;
+    }
     if (scripted === undefined || (facts.angular !== null && hasProjectScript(facts.angular, scripted.script))) continue;
     diagnostics.push({
       id: `step:${stepId}`,
@@ -568,7 +581,7 @@ export async function runDoctorChecks(cwd: string, options: DoctorOptions = {}):
     ...toolDiagnostics,
     await browserDiagnostic(facts, options.browsers),
     ...projectDiagnostics(facts),
-    ...pipelineDiagnostics(facts),
+    ...(await pipelineDiagnostics(facts)),
     ...environmentVariableDiagnostics(facts, env),
   ];
 }

@@ -1,4 +1,5 @@
-import { requiredEnvironmentVariables, type LocalCiConfig } from '../config/schema.js';
+import { isRunStep, requiredEnvironmentVariables, type LocalCiConfig, type RunStepDefinition } from '../config/schema.js';
+import { prepareRunStep, type PrepareOptions } from '../core/run-step.js';
 import type { Diagnostic } from '../diagnostics/types.js';
 import { satisfies } from '../env/semver.js';
 import { probeTool, type ProbeResult } from '../env/tools.js';
@@ -19,6 +20,32 @@ import type { Capability } from './types.js';
  *   BLOCKED / ERROR          -> the step is reported BLOCKED
  *   UNSUPPORTED              -> the step reports UNSUPPORTED when it is reached
  */
+
+/**
+ * BLOCKED diagnostic for a `run:` step that cannot be started safely (missing
+ * or escaping executable, unsafe Windows batch arguments, bad cwd), or null.
+ */
+export async function runStepDiagnostic(input: {
+  id: string;
+  label: string;
+  qid: string;
+  stepId: string;
+  definition: RunStepDefinition;
+  projectDir: string;
+  prepare?: PrepareOptions;
+}): Promise<Diagnostic | null> {
+  const prepared = await prepareRunStep(input.definition, input.projectDir, input.prepare);
+  if (prepared.ok) return null;
+  return {
+    id: input.id,
+    label: input.label,
+    severity: 'BLOCKED',
+    category: 'pipeline',
+    detail: prepared.reason,
+    recommendation: `Fix steps.${input.stepId}.run in .local-ci.yml. This step was not run.`,
+    steps: [input.qid],
+  };
+}
 
 export interface EcosystemDiagnosticOptions {
   skipToolProbes?: boolean;
@@ -44,8 +71,9 @@ function toolsNeeded(plan: ProjectPlan): Map<string, string[]> {
   const needed = new Map<string, string[]>();
   for (const stepId of plan.project.pipeline) {
     const qid = qualifiedPipeline(plan)[plan.project.pipeline.indexOf(stepId)]!;
-    const scripted = Object.hasOwn(plan.project.steps, stepId);
-    if (scripted) {
+    const definition = Object.hasOwn(plan.project.steps, stepId) ? plan.project.steps[stepId] : undefined;
+    if (definition !== undefined) {
+      if (isRunStep(definition)) continue;
       const manager = plan.scriptHost?.packageManager;
       if (manager) needed.set(manager, [...(needed.get(manager) ?? []), qid]);
       continue;
@@ -127,7 +155,7 @@ function declaresDependencies(plan: ProjectPlan): boolean {
   return host !== null && Object.keys(host.dependencies).length + Object.keys(host.devDependencies).length > 0;
 }
 
-function stepDiagnostics(plan: ProjectPlan): Diagnostic[] {
+async function stepDiagnostics(plan: ProjectPlan): Promise<Diagnostic[]> {
   const diagnostics: Diagnostic[] = [];
   const qids = qualifiedPipeline(plan);
   const pipeline = plan.project.pipeline;
@@ -141,10 +169,25 @@ function stepDiagnostics(plan: ProjectPlan): Diagnostic[] {
       return availableOf(plan, stepId)?.state === 'available';
     });
 
-  pipeline.forEach((stepId, index) => {
+  for (const [index, stepId] of pipeline.entries()) {
     const qid = qids[index]!;
     const stepLabel = `${label(plan)}: ${stepId}`;
     const scripted = Object.hasOwn(plan.project.steps, stepId) ? plan.project.steps[stepId] : undefined;
+
+    if (scripted !== undefined && isRunStep(scripted)) {
+      const problem = plan.dir === null
+        ? null
+        : await runStepDiagnostic({
+            id: id(plan, `step:${stepId}`),
+            label: stepLabel,
+            qid,
+            stepId,
+            definition: scripted,
+            projectDir: plan.dir,
+          });
+      if (problem) diagnostics.push(problem);
+      continue;
+    }
 
     if (scripted !== undefined) {
       const exists = host !== null && Object.hasOwn(host.scripts, scripted.script) && host.scripts[scripted.script]!.trim() !== '';
@@ -159,7 +202,7 @@ function stepDiagnostics(plan: ProjectPlan): Diagnostic[] {
           steps: [qid],
         });
       }
-      return;
+      continue;
     }
 
     if (plan.adapter === undefined) {
@@ -172,7 +215,7 @@ function stepDiagnostics(plan: ProjectPlan): Diagnostic[] {
         recommendation: 'This step will report UNSUPPORTED. Define it under steps, or use a recognised project type.',
         steps: [qid],
       });
-      return;
+      continue;
     }
 
     const capability = availableOf(plan, stepId);
@@ -186,7 +229,7 @@ function stepDiagnostics(plan: ProjectPlan): Diagnostic[] {
         recommendation: `Known steps are: ${plan.adapter.stepIds().join(', ')}. This step will report UNSUPPORTED.`,
         steps: [qid],
       });
-      return;
+      continue;
     }
 
     if (capability.state === 'unavailable') {
@@ -199,7 +242,7 @@ function stepDiagnostics(plan: ProjectPlan): Diagnostic[] {
         recommendation: 'This step will report UNSUPPORTED. Add the missing script, tool or configuration to enable it.',
         steps: [qid],
       });
-      return;
+      continue;
     }
 
     // Installing without a lockfile would create one (and may resolve newer
@@ -218,7 +261,7 @@ function stepDiagnostics(plan: ProjectPlan): Diagnostic[] {
           'from this project\'s pipeline and install dependencies manually.',
         steps: [qid],
       });
-      return;
+      continue;
     }
 
     for (const requirement of capability.requires) {
@@ -245,7 +288,7 @@ function stepDiagnostics(plan: ProjectPlan): Diagnostic[] {
         });
       }
     }
-  });
+  }
 
   return diagnostics;
 }
@@ -299,7 +342,7 @@ export async function ecosystemDiagnostics(
 
     diagnostics.push(...nodeRuntimeDiagnostics(plan));
     diagnostics.push(...(await toolDiagnostics(plan, options)));
-    const steps = stepDiagnostics(plan);
+    const steps = await stepDiagnostics(plan);
     unsupported += steps.filter((d) => d.severity === 'UNSUPPORTED').length;
     diagnostics.push(...steps);
   }

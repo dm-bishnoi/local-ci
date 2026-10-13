@@ -1,5 +1,6 @@
 import { CONFIG_FILE } from '../../config/loader.js';
-import { withEffectiveDefaults, type LocalCiConfig } from '../../config/schema.js';
+import { isRunStep, withEffectiveDefaults, type LocalCiConfig } from '../../config/schema.js';
+import { createRunStep } from '../../core/run-step.js';
 import {
   describeMissingAngular,
   registerAngularSteps,
@@ -73,6 +74,10 @@ function registerScriptSteps(
   for (const [id, definition] of Object.entries(scripted)) {
     // Own properties only: an id such as "constructor" must not pick up Object members.
     const name = (Object.hasOwn(STEP_NAMES, id) ? STEP_NAMES[id] : undefined) ?? id;
+    if (isRunStep(definition)) {
+      registry.register(createRunStep({ id, name, definition, projectDir: facts.cwd }));
+      continue;
+    }
     registry.register(
       facts.angular !== null && hasProjectScript(facts.angular, definition.script)
         ? createScriptStep({
