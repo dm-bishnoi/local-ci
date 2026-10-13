@@ -2,7 +2,7 @@ import { isRunStep, requiredEnvironmentVariables, type LocalCiConfig, type RunSt
 import { prepareRunStep, type PrepareOptions } from '../core/run-step.js';
 import type { Diagnostic } from '../diagnostics/types.js';
 import { satisfies } from '../env/semver.js';
-import { probeTool, type ProbeResult } from '../env/tools.js';
+import { probeExecutable, probeTool, type ProbeResult } from '../env/tools.js';
 import { qualifiedPipeline, type ProjectPlan } from './plan.js';
 import { unrecognisedTypeWarning } from './registry.js';
 import type { Capability } from './types.js';
@@ -50,7 +50,7 @@ export async function runStepDiagnostic(input: {
 export interface EcosystemDiagnosticOptions {
   skipToolProbes?: boolean;
   /** Substitutes the tool probe. Used by tests. */
-  probe?: (name: string) => Promise<ProbeResult>;
+  probe?: (name: string, args?: readonly string[], locateOnly?: boolean) => Promise<ProbeResult>;
 }
 
 function label(plan: ProjectPlan): string {
@@ -66,22 +66,47 @@ function availableOf(plan: ProjectPlan, stepId: string): Capability | undefined 
   return plan.detection?.capabilities[stepId];
 }
 
+interface NeededTool {
+  name: string;
+  probeArgs?: string[];
+  locateOnly?: boolean;
+  steps: string[];
+  versions: Array<{ atLeast: string; source: string; steps: string[] }>;
+}
+
 /** Tools every available capability of the plan needs, with the qualified steps that need them. */
-function toolsNeeded(plan: ProjectPlan): Map<string, string[]> {
-  const needed = new Map<string, string[]>();
-  for (const stepId of plan.project.pipeline) {
-    const qid = qualifiedPipeline(plan)[plan.project.pipeline.indexOf(stepId)]!;
+function toolsNeeded(plan: ProjectPlan): Map<string, NeededTool> {
+  const needed = new Map<string, NeededTool>();
+  const entry = (name: string, probeArgs: string[] | undefined, locateOnly: boolean | undefined): NeededTool => {
+    const key = `${name}|${(probeArgs ?? []).join(' ')}|${locateOnly ? 'locate' : 'run'}`;
+    let tool = needed.get(key);
+    if (!tool) {
+      tool = { name, ...(probeArgs ? { probeArgs } : {}), ...(locateOnly ? { locateOnly } : {}), steps: [], versions: [] };
+      needed.set(key, tool);
+    }
+    return tool;
+  };
+
+  for (const [index, stepId] of plan.project.pipeline.entries()) {
+    const qid = qualifiedPipeline(plan)[index]!;
     const definition = Object.hasOwn(plan.project.steps, stepId) ? plan.project.steps[stepId] : undefined;
     if (definition !== undefined) {
       if (isRunStep(definition)) continue;
       const manager = plan.scriptHost?.packageManager;
-      if (manager) needed.set(manager, [...(needed.get(manager) ?? []), qid]);
+      if (manager) entry(manager, undefined, undefined).steps.push(qid);
       continue;
     }
     const capability = availableOf(plan, stepId);
     if (capability?.state !== 'available') continue;
     for (const requirement of capability.requires) {
-      if (requirement.kind === 'tool') needed.set(requirement.name, [...(needed.get(requirement.name) ?? []), qid]);
+      if (requirement.kind === 'tool') {
+        entry(requirement.name, requirement.probeArgs, requirement.locateOnly).steps.push(qid);
+      } else if (requirement.kind === 'version') {
+        const tool = entry(requirement.tool, requirement.probeArgs, undefined);
+        const existing = tool.versions.find((v) => v.atLeast === requirement.atLeast && v.source === requirement.source);
+        if (existing) existing.steps.push(qid);
+        else tool.versions.push({ atLeast: requirement.atLeast, source: requirement.source, steps: [qid] });
+      }
     }
   }
   return needed;
@@ -89,14 +114,44 @@ function toolsNeeded(plan: ProjectPlan): Map<string, string[]> {
 
 async function toolDiagnostics(plan: ProjectPlan, options: EcosystemDiagnosticOptions): Promise<Diagnostic[]> {
   if (options.skipToolProbes) return [];
-  const probe = options.probe ?? ((name: string) => probeTool(name));
+  const probe =
+    options.probe ??
+    ((name: string, args?: readonly string[], locateOnly?: boolean) =>
+      locateOnly ? probeExecutable(name) : probeTool(name, args ?? ['--version']));
   const diagnostics: Diagnostic[] = [];
 
-  for (const [tool, steps] of toolsNeeded(plan)) {
-    const result = await probe(tool);
-    const base = { id: id(plan, `tool:${tool}`), label: `${label(plan)}: ${tool}`, category: 'environment' as const, steps };
+  for (const tool of toolsNeeded(plan).values()) {
+    const result = await probe(tool.name, tool.probeArgs, tool.locateOnly);
+    const base = { id: id(plan, `tool:${tool.name}`), label: `${label(plan)}: ${tool.name}`, category: 'environment' as const, steps: tool.steps };
     if (result.outcome === 'ok') {
-      diagnostics.push({ ...base, severity: 'PASS', detail: `${tool} ${result.version ?? '(version unknown)'}` });
+      const known = result.version !== undefined && result.version !== 'unknown';
+      diagnostics.push({ ...base, severity: 'PASS', detail: known ? `${tool.name} ${result.version}` : `${tool.name} found on PATH` });
+      for (const requirement of tool.versions) {
+        const verdict = satisfies(result.version ?? '', `>=${requirement.atLeast}`);
+        const versionBase = {
+          id: id(plan, `version:${tool.name}`),
+          label: `${label(plan)}: ${tool.name} version`,
+          category: 'environment' as const,
+          steps: requirement.steps,
+        };
+        if (verdict.verdict === 'satisfied') {
+          diagnostics.push({ ...versionBase, severity: 'PASS', detail: `${tool.name} ${result.version} satisfies >=${requirement.atLeast} (${requirement.source}).` });
+        } else if (verdict.verdict === 'violated') {
+          diagnostics.push({
+            ...versionBase,
+            severity: 'BLOCKED',
+            detail: `${requirement.source} requires ${tool.name} >= ${requirement.atLeast}, but ${result.version} is installed.`,
+            recommendation: `Install ${tool.name} ${requirement.atLeast} or newer. Automatic toolchain downloads are disabled so the check never uses the network unasked.`,
+          });
+        } else {
+          diagnostics.push({
+            ...versionBase,
+            severity: 'UNKNOWN',
+            detail: `${requirement.source} requires ${tool.name} >= ${requirement.atLeast}; the installed version "${result.version ?? 'unknown'}" could not be compared.`,
+            recommendation: 'Verify the version manually. local-ci-runner will not claim a compatibility it could not check.',
+          });
+        }
+      }
     } else if (result.outcome === 'blocked') {
       // The check itself was not permitted. That is a fact about the check, not
       // about the tool, so it is UNKNOWN and the step is allowed to try.
@@ -104,14 +159,14 @@ async function toolDiagnostics(plan: ProjectPlan, options: EcosystemDiagnosticOp
         ...base,
         severity: 'UNKNOWN',
         detail: result.detail,
-        recommendation: `${tool} could not be probed, so this check is unverified rather than passing.`,
+        recommendation: `${tool.name} could not be probed, so this check is unverified rather than passing.`,
       });
     } else {
       diagnostics.push({
         ...base,
         severity: 'BLOCKED',
-        detail: `Project "${label(plan)}" needs ${tool}, but ${tool} was not found on PATH.`,
-        recommendation: `Install ${tool}. Only the steps of project "${label(plan)}" that need it are blocked.`,
+        detail: `Project "${label(plan)}" needs ${tool.name}, but ${tool.name} was not found on PATH.`,
+        recommendation: `Install ${tool.name}. Only the steps of project "${label(plan)}" that need it are blocked.`,
       });
     }
   }

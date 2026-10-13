@@ -24,7 +24,16 @@ export type CapabilitySource =
   | 'builtin';
 
 export type Requirement =
-  | { kind: 'tool'; name: string }
+  | {
+      kind: 'tool';
+      name: string;
+      /** Arguments that print the version when `--version` does not (`go version`). */
+      probeArgs?: string[];
+      /** The tool has no version output (gofmt): only check that it is on PATH. */
+      locateOnly?: boolean;
+    }
+  /** The installed `tool` must be at least `atLeast`, as required by `source` (e.g. go.mod). */
+  | { kind: 'version'; tool: string; atLeast: string; source: string; probeArgs?: string[] }
   | { kind: 'dependencies'; detail: string }
   | { kind: 'lockfile'; file: string };
 
@@ -34,6 +43,13 @@ export interface AvailableCapability {
   args: string[];
   description: string;
   source: CapabilitySource;
+  /**
+   * Names a verdict check applied to a process that exited 0 (see
+   * ecosystems/evaluators.ts). Data, not a function, so capabilities stay serializable.
+   */
+  evaluate?: 'gofmt-list';
+  /** Constant environment added for this command, e.g. GOTOOLCHAIN=local. Never from configuration. */
+  env?: Record<string, string>;
   /** The evidence that justified the command, e.g. "eslint in devDependencies + eslint.config.js". */
   evidence?: string;
   requires: Requirement[];

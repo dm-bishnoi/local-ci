@@ -1,6 +1,7 @@
 import type { ProcessExecutor } from '../core/process-runner.js';
 import { createProcessStep } from '../core/process-step.js';
 import type { PipelineStep } from '../core/step-runner.js';
+import { evaluatorFor } from './evaluators.js';
 import type { Capability } from './types.js';
 
 export interface CapabilityStepOptions {
@@ -31,6 +32,8 @@ export function createCapabilityStep(id: string, capability: Capability, options
     name,
     command: capability.command,
     args: capability.args,
+    ...(capability.env !== undefined ? { env: capability.env } : {}),
+    ...(capability.evaluate !== undefined ? { evaluate: evaluatorFor(capability.evaluate)! } : {}),
     ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
     ...(options.exec !== undefined ? { exec: options.exec } : {}),
