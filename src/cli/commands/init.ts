@@ -294,7 +294,9 @@ async function buildPlan(cwd: string, options: InitOptions): Promise<InitPlan> {
       const adapter = ADAPTERS.find((candidate) => candidate.id === project.ecosystem)!;
       generated.push(await generate(project.name, project.type, project.path, adapter, project.detection));
     }
-    return { text: renderMulti(generated, notes), omitted: generated.flatMap((entry) => entry.omitted), notes };
+    // Qualified by project, so the same step left out of two projects is not listed twice.
+    const omitted = generated.flatMap((entry) => entry.omitted.map((step) => ({ ...step, id: `${entry.name}.${step.id}` })));
+    return { text: renderMulti(generated, notes), omitted, notes };
   }
 
   // Nothing found: the original behaviour, a complete default configuration.

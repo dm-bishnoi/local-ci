@@ -164,6 +164,15 @@ describe('ambiguity is never guessed', () => {
     expect(config.pipeline).toEqual(['api.test', 'web.build']);
   });
 
+  it('--all names a step left out of several projects once per project, not as a repeated bare id', async () => {
+    const dir = await makeTree(two);
+    await initCommand(dir, { all: true });
+    const message = logs.find((line) => line.startsWith('Left out of the pipeline')) ?? '';
+    expect(message).toContain('api.security');
+    expect(message).toContain('web.security');
+    expect(message).not.toMatch(/\bsecurity, [^.]*\bsecurity\b(?!\s*\()/);
+  });
+
   it('--path chooses one project', async () => {
     const dir = await makeTree(two);
     await initCommand(dir, { path: 'apps/web' });
