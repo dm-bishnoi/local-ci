@@ -46,6 +46,14 @@ export interface NodeDetection extends Detection {
   manifest: Record<string, unknown>;
   tsconfig: { exists: boolean; solutionStyle: boolean };
   declaredPackageManager: NodeManager | null;
+  /** node_modules is present and non-empty in the project or its workspace root. */
+  dependenciesOnDisk: boolean;
+}
+
+async function nodeModulesPresent(dir: string): Promise<boolean> {
+  if ((await listDir(join(dir, 'node_modules'))).length > 0) return true;
+  const workspaceRoot = await findWorkspaceRoot(dir);
+  return workspaceRoot !== null && (await listDir(join(workspaceRoot, 'node_modules'))).length > 0;
 }
 
 export function parseDeclaredManager(field: unknown): NodeManager | null {
@@ -161,6 +169,7 @@ export async function detectNode(dir: string): Promise<NodeDetection> {
     manifest: manifest ?? {},
     tsconfig,
     declaredPackageManager,
+    dependenciesOnDisk: manifest !== null && (await nodeModulesPresent(root)),
   };
 }
 

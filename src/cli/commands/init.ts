@@ -1,8 +1,14 @@
 import { access, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { parse as parseYaml } from 'yaml';
 import { resolveStep } from '../../adapters/angular/commands.js';
 import { detectAngularProject } from '../../adapters/angular/detect.js';
 import { CONFIG_FILE } from '../../config/loader.js';
+import { resolveProjectDir } from '../../config/projects.js';
+import { localCiConfigSchema, projectPathSchema } from '../../config/schema.js';
+import { DEFAULT_SCAN_DEPTH, MAX_SCAN_DEPTH, discoverProjects, type DiscoveryResult } from '../../ecosystems/discovery.js';
+import { ADAPTERS, adapterFor, knownProjectTypes } from '../../ecosystems/registry.js';
+import type { Detection, EcosystemAdapter } from '../../ecosystems/types.js';
 import { REPORT_ROOT_GITIGNORE, ensureReportRootIgnored } from '../../reporters/artifact.js';
 
 /** The default Angular pipeline, in the order the steps run. */
@@ -53,17 +59,256 @@ async function configFor(cwd: string): Promise<{ text: string; omitted: OmittedS
   return { text: renderConfig(pipeline, omitted), omitted };
 }
 
-export async function initCommand(cwd: string, force = false): Promise<void> {
-  const path = join(cwd, CONFIG_FILE);
-  try {
-    await access(path);
-    if (!force) throw new Error(`${CONFIG_FILE} already exists. Use --force to replace it.`);
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('already exists')) throw error;
+export interface InitOptions {
+  /** Replace an existing configuration. */
+  force?: boolean;
+  /** Write this project type instead of detecting it. */
+  type?: string;
+  /** Project directory, relative to the repository root. */
+  path?: string;
+  /** Write every discovered project as a `projects:` list. */
+  all?: boolean;
+  scanDepth?: number;
+  ignore?: readonly string[];
+  /** Print the configuration instead of writing it. */
+  dryRun?: boolean;
+}
+
+interface GeneratedProject {
+  name: string;
+  type: string;
+  path: string;
+  pipeline: string[];
+  omitted: OmittedStep[];
+}
+
+interface InitPlan {
+  text: string;
+  omitted: OmittedStep[];
+  notes: string[];
+}
+
+export class InitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InitError';
   }
-  const { text, omitted } = await configFor(cwd);
+}
+
+const quote = (value: string): string => JSON.stringify(value);
+const comment = (text: string): string => `# ${text.replace(/\r?\n/g, ' ')}`;
+
+function renderOmitted(omitted: readonly OmittedStep[], indent: string): string[] {
+  if (omitted.length === 0) return [];
+  return [
+    `${indent}# Not added (see the reason after each step). Fix the cause, then add it.`,
+    ...omitted.map(({ id, reason }) => `${indent}# - ${id}  # ${reason.replace(/\r?\n/g, ' ')}`),
+  ];
+}
+
+function renderSettings(): string[] {
+  return ['', 'settings:', '  failFast: false', '  timeoutMs: 300000', ''];
+}
+
+function renderSingle(project: GeneratedProject, header: readonly string[]): string {
+  const lines = [...header.map(comment), 'version: 1', '', 'project:', `  type: ${quote(project.type)}`];
+  if (project.path !== '.') lines.push(`  path: ${quote(project.path)}`);
+  lines.push('', 'pipeline:', ...project.pipeline.map((id) => `  - ${id}`), ...renderOmitted(project.omitted, '  '), ...renderSettings());
+  return lines.join('\n');
+}
+
+function renderMulti(projects: readonly GeneratedProject[], header: readonly string[]): string {
+  const lines = [...header.map(comment), 'version: 1', '', 'projects:'];
+  for (const project of projects) {
+    lines.push(`  - name: ${quote(project.name)}`, `    type: ${quote(project.type)}`, `    path: ${quote(project.path)}`);
+    lines.push('    pipeline:', ...project.pipeline.map((id) => `      - ${id}`), ...renderOmitted(project.omitted, '      '), '');
+  }
+  lines.push(...renderSettings().slice(1));
+  return lines.join('\n');
+}
+
+function generate(name: string, type: string, path: string, adapter: EcosystemAdapter, detection: Detection): GeneratedProject {
+  const { pipeline, omitted } = adapter.defaultPipeline(detection);
+  if (pipeline.length === 0) {
+    throw new InitError(
+      `No runnable checks were found for "${path === '.' ? type : path}" (${type}). Nothing was written.\n` +
+        `${omitted.map((step) => `  - ${step.id}: ${step.reason}`).join('\n')}\n` +
+        'Add the missing scripts, tools or configuration, or define the checks yourself under steps (script: or run:).',
+    );
+  }
+  return { name, type, path, pipeline, omitted };
+}
+
+/** A human-readable account of what discovery saw, so nothing is silently dropped. */
+function discoveryNotes(discovery: DiscoveryResult): string[] {
+  const notes: string[] = [];
+  for (const member of discovery.covered) {
+    notes.push(`Covered by "${member.coveredBy}" (${member.source}), not listed separately: ${member.path}`);
+  }
+  for (const candidate of discovery.candidates) {
+    notes.push(`Possible ${candidate.ecosystem} project at "${candidate.path}" (${candidate.reason}); not added because the evidence is weak.`);
+  }
+  for (const path of discovery.skipped.depthLimited) {
+    notes.push(`Not scanned below "${path}" (scan depth limit). Raise it with --scan-depth.`);
+  }
+  for (const path of discovery.skipped.symlinks) notes.push(`Symbolic link not followed: ${path}`);
+  notes.push(...discovery.warnings);
+  return notes;
+}
+
+function describeProjects(discovery: DiscoveryResult): string {
+  return discovery.projects
+    .map((project) => {
+      const nested = project.nestedIn ? ` (inside "${project.nestedIn}", not declared as a member)` : '';
+      return `  - ${project.name}: ${project.type} at "${project.path}"${nested}\n      local-ci-runner init --path ${quote(project.path)} --type ${project.type}`;
+    })
+    .join('\n');
+}
+
+async function detectAt(dir: string, type: string | undefined): Promise<{ adapter: EcosystemAdapter; detection: Detection }> {
+  if (type !== undefined) {
+    const adapter = adapterFor(type);
+    if (!adapter) throw new InitError(`Unknown project type "${type}". Known types: ${knownProjectTypes().join(', ')}.`);
+    const detection = await adapter.detect(dir);
+    if (!detection.detected) {
+      throw new InitError(`No ${type} project was detected at "${dir}": ${detection.reason ?? 'no evidence found'}`);
+    }
+    return { adapter, detection };
+  }
+
+  const hits: Array<{ adapter: EcosystemAdapter; detection: Detection }> = [];
+  for (const adapter of ADAPTERS) {
+    const detection = await adapter.detect(dir);
+    if (detection.detected && detection.confidence === 'strong') hits.push({ adapter, detection });
+  }
+  if (hits.length === 0) throw new InitError(`No supported project was detected at "${dir}".`);
+  if (hits.length > 1) {
+    throw new InitError(
+      `More than one ecosystem was detected at "${dir}": ${hits.map((hit) => hit.adapter.id).join(', ')}. ` +
+        'Choose one with --type, or write every project with --all.',
+    );
+  }
+  return hits[0]!;
+}
+
+async function buildPlan(cwd: string, options: InitOptions): Promise<InitPlan> {
+  const scanDepth = options.scanDepth ?? DEFAULT_SCAN_DEPTH;
+  if (!Number.isInteger(scanDepth) || scanDepth < 0 || scanDepth > MAX_SCAN_DEPTH) {
+    throw new InitError(`--scan-depth must be a whole number from 0 to ${MAX_SCAN_DEPTH}.`);
+  }
+  if (options.type !== undefined && adapterFor(options.type) === undefined) {
+    throw new InitError(`Unknown project type "${options.type}". Known types: ${knownProjectTypes().join(', ')}.`);
+  }
+  if (options.all && (options.type !== undefined || options.path !== undefined)) {
+    throw new InitError('--all cannot be combined with --type or --path.');
+  }
+
+  let projectPath = '.';
+  if (options.path !== undefined) {
+    const checked = projectPathSchema.safeParse(options.path);
+    if (!checked.success) throw new InitError(`--path ${quote(options.path)}: ${checked.error.issues[0]?.message ?? 'invalid'}.`);
+    projectPath = options.path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '') || '.';
+  }
+
+  const discovery = await discoverProjects(cwd, {
+    scanDepth,
+    ...(options.ignore !== undefined ? { ignore: options.ignore } : {}),
+  });
+  const notes = discoveryNotes(discovery);
+
+  // Explicit selection: --type and/or --path.
+  if (options.type !== undefined || options.path !== undefined) {
+    const resolved = await resolveProjectDir(cwd, projectPath);
+    if (!resolved.ok) throw new InitError(resolved.reason);
+    const { adapter, detection } = await detectAt(resolved.dir, options.type);
+
+    // An Angular project at the root keeps the original, byte-identical output.
+    if (projectPath === '.' && (options.type === undefined || options.type.toLowerCase() === 'angular')) {
+      if ((await detectAngularProject(cwd)).detected) {
+        const legacy = await configFor(cwd);
+        return { text: legacy.text, omitted: legacy.omitted, notes };
+      }
+    }
+
+    const type = options.type?.toLowerCase() ?? adapter.suggestType?.(detection) ?? adapter.id;
+    const generated = generate('project', type, projectPath, adapter, detection);
+    return { text: renderSingle(generated, notes), omitted: generated.omitted, notes };
+  }
+
+  if (options.all) {
+    if (discovery.projects.length === 0) throw new InitError('No supported projects were found to write. Nothing was written.');
+    const generated = discovery.projects.map((project) => {
+      const adapter = ADAPTERS.find((candidate) => candidate.id === project.ecosystem)!;
+      return generate(project.name, project.type, project.path, adapter, project.detection);
+    });
+    return { text: renderMulti(generated, notes), omitted: generated.flatMap((entry) => entry.omitted), notes };
+  }
+
+  // Nothing found: the original behaviour, a complete default configuration.
+  if (discovery.projects.length === 0) {
+    const legacy = await configFor(cwd);
+    return {
+      text: legacy.text,
+      omitted: legacy.omitted,
+      notes: [
+        'No supported project was detected, so the default configuration was written. Choose a type with --type, or edit the file.',
+        ...notes,
+      ],
+    };
+  }
+
+  if (discovery.projects.length > 1) {
+    throw new InitError(
+      'More than one project was found. Nothing was written. Choose one, or write them all with "local-ci-runner init --all":\n' +
+        describeProjects(discovery),
+    );
+  }
+
+  const only = discovery.projects[0]!;
+  if (only.path === '.' && (await detectAngularProject(cwd)).detected) {
+    const legacy = await configFor(cwd);
+    return { text: legacy.text, omitted: legacy.omitted, notes };
+  }
+  const adapter = ADAPTERS.find((candidate) => candidate.id === only.ecosystem)!;
+  const generated = generate(only.name, only.type, only.path, adapter, only.detection);
+  return { text: renderSingle(generated, notes), omitted: generated.omitted, notes };
+}
+
+export async function initCommand(cwd: string, forceOrOptions: boolean | InitOptions = false): Promise<void> {
+  const options: InitOptions = typeof forceOrOptions === 'boolean' ? { force: forceOrOptions } : forceOrOptions;
+  const path = join(cwd, CONFIG_FILE);
+
+  const existing = await access(path).then(
+    () => true,
+    () => false,
+  );
+  if (existing && !options.force && !options.dryRun) {
+    throw new Error(
+      `${CONFIG_FILE} already exists. Use --force to replace it, or --dry-run to preview a new one without writing.`,
+    );
+  }
+
+  const { text, omitted, notes } = await buildPlan(cwd, options);
+
+  // Never write a file the loader would reject.
+  const check = localCiConfigSchema.safeParse(parseYaml(text));
+  if (!check.success) {
+    throw new InitError(
+      'Internal error: the generated configuration is invalid and was not written: ' +
+        check.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; '),
+    );
+  }
+
+  if (options.dryRun) {
+    console.log(text);
+    if (existing) console.log(`(${CONFIG_FILE} already exists and was not modified.)`);
+    for (const note of notes) console.log(`Note: ${note}`);
+    return;
+  }
+
   await writeFile(path, text, 'utf8');
   console.log(`Created ${CONFIG_FILE}`);
+  for (const note of notes) console.log(`Note: ${note}`);
   if (omitted.length > 0) {
     console.log(
       `Left out of the pipeline because this project cannot run them yet: ${omitted.map((step) => step.id).join(', ')}. ` +

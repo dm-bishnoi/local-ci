@@ -58,6 +58,20 @@ export interface Detection {
   capabilities: Record<string, Capability>;
 }
 
+/** Members a project declares for itself (npm workspaces, go.work, Cargo workspace, ...). */
+export interface WorkspaceMembers {
+  /** Directory patterns relative to the project, exactly as declared. */
+  patterns: string[];
+  /** File that declared them, for messages. */
+  source: string;
+}
+
+export interface DefaultPipeline {
+  pipeline: string[];
+  /** Steps left out, each with the reason; written into the generated file as comments. */
+  omitted: Array<{ id: string; reason: string }>;
+}
+
 export interface EcosystemAdapter {
   id: EcosystemId;
   /** Config-facing type names handled by this adapter (lower case). */
@@ -66,4 +80,10 @@ export interface EcosystemAdapter {
   detect(dir: string): Promise<Detection>;
   stepIds(): readonly string[];
   stepName(id: string): string;
+  /** The `project.type` to write for a detection; defaults to the ecosystem id. */
+  suggestType?(detection: Detection): string;
+  /** Declared workspace members, so they are covered by the root project instead of listed again. */
+  workspaceMembers?(dir: string): Promise<WorkspaceMembers | null>;
+  /** The minimal pipeline `init` generates: only steps that can run for this project. */
+  defaultPipeline(detection: Detection): DefaultPipeline;
 }

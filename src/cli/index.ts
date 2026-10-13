@@ -17,7 +17,38 @@ program
 program.command('init')
   .description('Create a .local-ci.yml configuration')
   .option('--force', 'replace an existing configuration')
-  .action(async (options: { force?: boolean }) => initCommand(process.cwd(), options.force));
+  .option('--dry-run', 'print the configuration instead of writing it')
+  .option('--type <type>', 'project type to write instead of detecting it')
+  .option('--path <dir>', 'project directory, relative to the repository root')
+  .option('--all', 'write every detected project as a "projects:" list')
+  .option('--scan-depth <n>', 'how many directory levels to scan for projects (0-8, default 3)', (value: string) => Number(value))
+  .option('--ignore <name>', 'directory name to skip while scanning (repeatable)', (value: string, previous: string[]) => [...previous, value], [] as string[])
+  .action(
+    async (options: {
+      force?: boolean;
+      dryRun?: boolean;
+      type?: string;
+      path?: string;
+      all?: boolean;
+      scanDepth?: number;
+      ignore: string[];
+    }) => {
+      try {
+        await initCommand(process.cwd(), {
+          ...(options.force ? { force: true } : {}),
+          ...(options.dryRun ? { dryRun: true } : {}),
+          ...(options.type !== undefined ? { type: options.type } : {}),
+          ...(options.path !== undefined ? { path: options.path } : {}),
+          ...(options.all ? { all: true } : {}),
+          ...(options.scanDepth !== undefined ? { scanDepth: options.scanDepth } : {}),
+          ...(options.ignore.length > 0 ? { ignore: options.ignore } : {}),
+        });
+      } catch (error) {
+        console.error(`local-ci-runner: ${error instanceof Error ? error.message : String(error)}`);
+        process.exitCode = 1;
+      }
+    },
+  );
 
 program.command('validate')
   .description('Validate .local-ci.yml')

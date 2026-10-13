@@ -1,12 +1,9 @@
-import { join } from 'node:path';
-import { findWorkspaceRoot } from '../adapters/angular/detect.js';
 import { normalizeProjects, qualifyStepId, resolveProjectDir, type ConfiguredProject } from '../config/projects.js';
 import { isRunStep, type LocalCiConfig } from '../config/schema.js';
 import type { ProcessExecutor } from '../core/process-runner.js';
 import { createRunStep } from '../core/run-step.js';
 import { createMissingScriptStep, createScriptStep } from '../core/script-step.js';
 import { StepRegistry } from '../core/step-runner.js';
-import { listDir } from './fs.js';
 import { detectNode, type NodeDetection } from './node/detect.js';
 import { adapterFor } from './registry.js';
 import { createCapabilityStep } from './steps.js';
@@ -59,13 +56,6 @@ export function stepDisplayName(plan: ProjectPlan, id: string): string {
   return plan.project.name === null ? base : `${plan.project.name}: ${base}`;
 }
 
-async function nodeModulesPresent(dir: string): Promise<boolean> {
-  const own = await listDir(join(dir, 'node_modules'));
-  if (own.length > 0) return true;
-  const workspaceRoot = await findWorkspaceRoot(dir);
-  return workspaceRoot !== null && (await listDir(join(workspaceRoot, 'node_modules'))).length > 0;
-}
-
 export async function planProjects(root: string, config: LocalCiConfig): Promise<ProjectPlan[]> {
   const plans: ProjectPlan[] = [];
 
@@ -101,7 +91,7 @@ export async function planProjects(root: string, config: LocalCiConfig): Promise
       detection,
       scriptHost: scriptHost.detected ? scriptHost : null,
       problem: null,
-      dependenciesOnDisk: scriptHost.detected ? await nodeModulesPresent(resolved.dir) : false,
+      dependenciesOnDisk: scriptHost.detected ? scriptHost.dependenciesOnDisk : false,
     });
   }
   return plans;
