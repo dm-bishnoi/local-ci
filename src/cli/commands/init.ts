@@ -145,7 +145,10 @@ async function withoutMissingTools(
   const cache = new Map<string, Promise<{ outcome: string; detail: string }>>();
   const probe = (name: string, args: readonly string[] | undefined, locateOnly: boolean | undefined, env: Record<string, string> | undefined) => {
     const key = `${name}|${(args ?? []).join(' ')}|${locateOnly ? 'l' : 'r'}`;
-    if (!cache.has(key)) cache.set(key, locateOnly ? probeExecutable(name) : probeTool(name, args ?? ['--version'], env ? { env } : {}));
+    if (!cache.has(key)) cache.set(
+        key,
+        locateOnly ? probeExecutable(name) : probeTool(name, args ?? ['--version'], { ...(env ? { env } : {}), requireZeroExit: args !== undefined }),
+      );
     return cache.get(key)!;
   };
 

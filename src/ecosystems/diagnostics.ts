@@ -139,7 +139,9 @@ async function toolDiagnostics(plan: ProjectPlan, options: EcosystemDiagnosticOp
   const probe =
     options.probe ??
     ((name: string, args?: readonly string[], locateOnly?: boolean, env?: Record<string, string>) =>
-      locateOnly ? probeExecutable(name) : probeTool(name, args ?? ['--version'], env ? { env } : {}));
+      locateOnly
+        ? probeExecutable(name)
+        : probeTool(name, args ?? ['--version'], { ...(env ? { env } : {}), requireZeroExit: args !== undefined }));
   const diagnostics: Diagnostic[] = [];
 
   for (const tool of toolsNeeded(plan).values()) {
@@ -190,9 +192,10 @@ async function toolDiagnostics(plan: ProjectPlan, options: EcosystemDiagnosticOp
       diagnostics.push({
         ...base,
         severity: 'BLOCKED',
-        detail: tool.display
-          ? `Project "${label(plan)}" needs ${shown}, but it is not available (${result.detail}).`
-          : `Project "${label(plan)}" needs ${tool.name}, but ${tool.name} was not found on PATH.`,
+        detail:
+          tool.display || !/was not found on PATH\.$/.test(result.detail)
+            ? `Project "${label(plan)}" needs ${shown}, but it is not available (${result.detail}).`
+            : `Project "${label(plan)}" needs ${tool.name}, but ${tool.name} was not found on PATH.`,
         recommendation: `Install ${shown}. Only the steps of project "${label(plan)}" that need it are blocked.`,
       });
     }

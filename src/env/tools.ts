@@ -89,7 +89,7 @@ function extractVersionStrict(output: string): string | undefined {
 export async function probeTool(
   name: string,
   versionArgs: readonly string[] = ['--version'],
-  options: { env?: NodeJS.ProcessEnv } = {},
+  options: { env?: NodeJS.ProcessEnv; requireZeroExit?: boolean } = {},
 ): Promise<ProbeResult> {
   try {
     // On Windows, npm/pnpm/yarn are `.cmd` shims, and a `.cmd` file cannot be
@@ -136,6 +136,24 @@ export async function probeTool(
         detail: blocked
           ? `${name} could not be checked: process execution was blocked (${code}).`
           : `${name} could not be checked: ${code ?? 'spawn failed'}.`,
+      };
+    }
+
+    // A probe of a module or subcommand (`python -m pytest --version`,
+    // `cargo clippy --version`) has no business exiting non-zero: failing means
+    // it is not there. Its error text must not be mined for a version, because it
+    // routinely contains one by accident (an install path such as Python3.14-64).
+    if (options.requireZeroExit) {
+      const stderrText = String((error as { stderr?: unknown }).stderr ?? '');
+      const stdoutText = String((error as { stdout?: unknown }).stdout ?? '');
+      const firstLine =
+        [stderrText, stdoutText]
+          .flatMap((text) => text.split(/\r?\n/))
+          .map((line) => line.trim())
+          .find((line) => line.length > 0) ?? '';
+      return {
+        outcome: 'missing',
+        detail: firstLine ? `${name} ${versionArgs.join(' ')} failed: ${firstLine.slice(0, 200)}` : `${name} ${versionArgs.join(' ')} failed.`,
       };
     }
 
