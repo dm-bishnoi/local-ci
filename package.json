@@ -1,14 +1,15 @@
 {
   "name": "@dm-bishnoi/local-ci-runner",
-  "version": "0.1.1",
-  "description": "Run Angular CI checks locally before pushing, with preflight diagnostics and console, JSON, and HTML reports.",
+  "version": "0.2.0",
+  "description": "Run CI-style checks locally before pushing: an Angular adapter plus package.json script steps for any Node.js project, with preflight diagnostics and console, JSON, and HTML reports.",
   "type": "module",
   "bin": {
     "local-ci-runner": "dist/cli/index.js"
   },
   "files": [
     "dist",
-    "templates"
+    "templates",
+    "CHANGELOG.md"
   ],
   "engines": {
     "node": ">=20.5.0"
