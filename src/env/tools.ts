@@ -12,6 +12,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { resolveOnPath } from '../core/resolve-executable.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -91,6 +92,13 @@ export async function probeTool(
   versionArgs: readonly string[] = ['--version'],
   options: { env?: NodeJS.ProcessEnv; requireZeroExit?: boolean } = {},
 ): Promise<ProbeResult> {
+  // A bare name is looked up on PATH first, by this program rather than by a
+  // shell, so "not installed" is the same answer on every platform and in every
+  // locale (cmd.exe's "is not recognized" message is translated).
+  if (!/[\\/]/.test(name) && (await resolveOnPath(name)) === null) {
+    return { outcome: 'missing', detail: `${name} was not found on PATH.` };
+  }
+
   try {
     // On Windows, npm/pnpm/yarn are `.cmd` shims, and a `.cmd` file cannot be
     // spawned directly — Node refuses without a shell. The whole invocation is

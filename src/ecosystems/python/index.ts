@@ -131,8 +131,13 @@ async function detect(dir: string): Promise<PythonDetection> {
   if (toxIni !== null) weak.push('tox.ini');
   if (entries.has('pytest.ini')) weak.push('pytest.ini');
 
-  const venv = await findVenv(dir);
-  const interpreter = await findInterpreter(dir, venv);
+  // Discovery runs every adapter in every scanned directory, so the (comparatively
+  // expensive) PATH lookup for an interpreter only happens once there is evidence
+  // that this is a Python project at all.
+  const found = strong.length > 0 || weak.length > 0;
+  const venv = found ? await findVenv(dir) : null;
+  const unresolved: PythonInterpreter = { command: 'python3', prefixArgs: [], source: 'path', display: 'python3' };
+  const interpreter = found ? await findInterpreter(dir, venv) : unresolved;
 
   const base = {
     ecosystem: 'python' as const,

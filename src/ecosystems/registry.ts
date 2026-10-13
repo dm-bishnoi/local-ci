@@ -2,6 +2,7 @@ import { dotnetAdapter } from './dotnet/index.js';
 import { goAdapter } from './go/index.js';
 import { javaAdapter } from './java/index.js';
 import { nodeAdapter } from './node/index.js';
+import { phpAdapter } from './php/index.js';
 import { pythonAdapter } from './python/index.js';
 import { rustAdapter } from './rust/index.js';
 import type { EcosystemAdapter } from './types.js';
@@ -10,7 +11,7 @@ import type { EcosystemAdapter } from './types.js';
  * Registered adapters in a fixed order. Order is the tie-break whenever more
  * than one adapter claims a directory, so detection is deterministic.
  */
-export const ADAPTERS: readonly EcosystemAdapter[] = [nodeAdapter, dotnetAdapter, javaAdapter, pythonAdapter, goAdapter, rustAdapter];
+export const ADAPTERS: readonly EcosystemAdapter[] = [nodeAdapter, dotnetAdapter, javaAdapter, pythonAdapter, phpAdapter, goAdapter, rustAdapter];
 
 /** Resolves a config `project.type` (case-insensitive) to its adapter, or undefined if unrecognised. */
 export function adapterFor(type: string): EcosystemAdapter | undefined {
