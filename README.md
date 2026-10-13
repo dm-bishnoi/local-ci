@@ -221,6 +221,14 @@ npx @dm-bishnoi/local-ci-runner init
 npx @dm-bishnoi/local-ci-runner run
 ```
 
+In an Angular project, `init` lists only the default steps (`install`, `typecheck`,
+`test`, `coverage`, `lint`, `build`, `security`) that the project can actually run.
+A step it cannot run yet, for example `lint` without a `"lint"` script or `install`
+without a lockfile, is written as a comment in `pipeline` with the reason, and is
+named in the output. Fix the cause and uncomment the line to add it; an unsupported
+step that is listed is reported as `UNSUPPORTED`, never as passing. Outside an Angular
+project `init` writes the full default pipeline.
+
 `init` also creates `.local-ci/.gitignore` (containing `*`), so stored reports stay
 out of version control. Your own `.gitignore` is never edited. `run` creates the same
 file if it is missing, and never overwrites one that exists.
