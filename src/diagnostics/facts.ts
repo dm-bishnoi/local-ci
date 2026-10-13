@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { detectAngularProject, type AngularDetection, type PackageManager } from '../adapters/angular/detect.js';
 import { CONFIG_FILE, loadConfig, ConfigError } from '../config/loader.js';
 import type { LocalCiConfig } from '../config/schema.js';
+import { planProjects, usesEcosystemPath, type ProjectPlan } from '../ecosystems/plan.js';
 import { parseNvmrc, satisfies, parseVersion, type RangeResult } from '../env/semver.js';
 
 export const NVMRC_FILE = '.nvmrc';
@@ -64,6 +65,12 @@ export interface ProjectFacts {
   lockfile: string | null;
   angular: AngularDetection | null;
   config: ConfigObservation;
+  /**
+   * Per-project plans when the configuration runs through the ecosystem
+   * adapters (`projects:`, `project.path`, or a non-Angular recognised type);
+   * `null` for the original single-project Angular/generic path.
+   */
+  plans: ProjectPlan[] | null;
   node: NodeRequirementObservation;
   dependenciesOnDisk: DependenciesObservation;
   /** Names from `.env.example`, used only to offer guidance about expected variables. */
@@ -183,6 +190,8 @@ export async function collectProjectFacts(cwd: string): Promise<ProjectFacts> {
 
   const angular = await detectAngularProject(cwd);
   const dependenciesOnDisk = await readDependencyState(cwd);
+  const config = await collectConfig(cwd);
+  const plans = config.config !== null && usesEcosystemPath(config.config) ? await planProjects(cwd, config.config) : null;
 
   const packageManagerField = typeof pkg.value?.packageManager === 'string' ? pkg.value.packageManager : null;
   const enginesNode =
@@ -202,7 +211,8 @@ export async function collectProjectFacts(cwd: string): Promise<ProjectFacts> {
     declaredPackageManager: parsePackageManagerField(packageManagerField),
     lockfile: angular.lockfile,
     angular,
-    config: await collectConfig(cwd),
+    config,
+    plans,
     node: await readNodeRequirement(cwd, enginesNode),
     dependenciesOnDisk,
     envExampleNames,

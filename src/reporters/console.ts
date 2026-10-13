@@ -25,7 +25,7 @@ import {
   statusIcon,
   statusLabel,
 } from './format.js';
-import type { ReportStep, RunReport } from './report-model.js';
+import type { ProjectSummary, ReportStep, RunReport } from './report-model.js';
 import { renderDiagnostics } from './diagnostics-format.js';
 
 const RULE = '-'.repeat(46);
@@ -56,6 +56,31 @@ function renderStepRows(steps: readonly ReportStep[]): string[] {
 
     const detail = stepDetail(step);
     return detail ? `${row}  ${detail}` : row;
+  });
+}
+
+/** One row per project, so a blocked project is visible next to one that passed. */
+function renderProjectRows(projects: readonly ProjectSummary[]): string[] {
+  const nameWidth = Math.max(...projects.map((project) => project.name.length), 0);
+  const typeWidth = Math.max(...projects.map((project) => project.type.length), 0);
+  const outcomeWidth = Math.max(...projects.map((project) => project.outcome.length), 0);
+
+  return projects.map((project) => {
+    const { counts } = project;
+    const parts = [`${counts.passed}/${counts.total} passed`];
+    if (counts.failed > 0) parts.push(`${counts.failed} failed`);
+    if (counts.timeout > 0) parts.push(`${counts.timeout} timed out`);
+    if (counts.blocked > 0) parts.push(`${counts.blocked} blocked`);
+    if (counts.unsupported > 0) parts.push(`${counts.unsupported} unsupported`);
+    if (counts.skipped > 0) parts.push(`${counts.skipped} skipped`);
+    if (counts.cancelled > 0) parts.push(`${counts.cancelled} cancelled`);
+    if (counts.error > 0) parts.push(`${counts.error} errors`);
+    return [
+      padEnd(project.name, nameWidth),
+      padEnd(project.type, typeWidth),
+      padEnd(project.outcome, outcomeWidth),
+      `${parts.join(', ')}  (${project.path})`,
+    ].join('  ');
   });
 }
 
@@ -102,6 +127,10 @@ export function formatConsoleReport(report: RunReport): string {
 
   if (report.steps.length === 0) lines.push('(no steps were executed)');
   else lines.push(...renderStepRows(report.steps));
+
+  if (report.projects && report.projects.length > 0) {
+    lines.push('', 'PROJECTS', ...renderProjectRows(report.projects));
+  }
 
   lines.push('', RULE, '');
   lines.push(field('Result', overallLabel(report.status)));

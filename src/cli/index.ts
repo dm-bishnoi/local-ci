@@ -39,8 +39,9 @@ program.command('preflight')
 
 program.command('run')
   .description('Run the configured local CI pipeline')
-  .action(async () => {
-    const code = await runCommand(process.cwd());
+  .option('-p, --project <name>', 'run only this project of a "projects:" configuration (repeatable)', (value: string, previous: string[]) => [...previous, value], [] as string[])
+  .action(async (options: { project: string[] }) => {
+    const code = await runCommand(process.cwd(), options.project.length > 0 ? { projects: options.project } : {});
     if (code !== 0) process.exitCode = code;
   });
 

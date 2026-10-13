@@ -18,6 +18,7 @@ import { requiredEnvironmentVariables } from '../config/schema.js';
 import { resolveStep, supportedStepIds } from '../adapters/angular/commands.js';
 import { detectBrowsers, requiresBrowser, type BrowserSearchResult } from '../env/browser.js';
 import { probeTool } from '../env/tools.js';
+import { ecosystemDiagnostics } from '../ecosystems/diagnostics.js';
 import { collectProjectFacts, type ProjectFacts } from './facts.js';
 import type { Diagnostic } from './types.js';
 import type { AngularDetection } from '../adapters/angular/detect.js';
@@ -479,6 +480,23 @@ function environmentVariableDiagnostics(facts: ProjectFacts, env: NodeJS.Process
 export async function runPreflightChecks(cwd: string, options: PreflightOptions = {}): Promise<Diagnostic[]> {
   const facts = options.facts ?? (await collectProjectFacts(cwd));
   const env = options.env ?? process.env;
+
+  // Adapter-driven configurations get per-project, step-scoped diagnostics.
+  // The checks below describe one Node project at the repository root.
+  if (facts.plans !== null && facts.config.config !== null) {
+    return [
+      {
+        id: 'config',
+        label: '.local-ci.yml',
+        severity: 'PASS',
+        category: 'configuration',
+        detail: `Valid configuration with ${facts.plans.length} project(s) and ${facts.config.config.pipeline.length} pipeline step(s).`,
+      },
+      ...(await ecosystemDiagnostics(facts.plans, facts.config.config, env, {
+        ...(options.skipToolProbes !== undefined ? { skipToolProbes: options.skipToolProbes } : {}),
+      })),
+    ];
+  }
 
   return [
     ...nodeDiagnostic(facts),

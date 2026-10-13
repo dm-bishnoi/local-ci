@@ -37,6 +37,8 @@ export interface StepResult {
   stdout?: string;
   stderr?: string;
   error?: string;
+  /** Name of the project this step belongs to, in multi-project runs. */
+  project?: string;
 }
 
 export interface PipelineStep {

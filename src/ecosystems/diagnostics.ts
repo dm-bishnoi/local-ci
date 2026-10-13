@@ -1,0 +1,345 @@
+import { requiredEnvironmentVariables, type LocalCiConfig } from '../config/schema.js';
+import type { Diagnostic } from '../diagnostics/types.js';
+import { satisfies } from '../env/semver.js';
+import { probeTool, type ProbeResult } from '../env/tools.js';
+import { qualifiedPipeline, type ProjectPlan } from './plan.js';
+import { unrecognisedTypeWarning } from './registry.js';
+import type { Capability } from './types.js';
+
+/**
+ * Preflight / doctor diagnostics for the adapter-driven path.
+ *
+ * Every diagnostic is scoped to the qualified step ids it affects, so a blocked
+ * project never stops another project from running. The only unscoped blockers
+ * are configuration-wide ones (a required environment variable that is unset).
+ *
+ * Severity mapping (unchanged from 0.2.x, and the only way a diagnostic turns
+ * into a step status):
+ *   PASS / WARNING / UNKNOWN -> the step runs and its own result decides
+ *   BLOCKED / ERROR          -> the step is reported BLOCKED
+ *   UNSUPPORTED              -> the step reports UNSUPPORTED when it is reached
+ */
+
+export interface EcosystemDiagnosticOptions {
+  skipToolProbes?: boolean;
+  /** Substitutes the tool probe. Used by tests. */
+  probe?: (name: string) => Promise<ProbeResult>;
+}
+
+function label(plan: ProjectPlan): string {
+  return plan.project.name ?? plan.project.type;
+}
+
+/** Single-project configurations keep the bare ids of 0.2.x; named projects are prefixed. */
+function id(plan: ProjectPlan, suffix: string): string {
+  return plan.project.name === null ? suffix : `project:${plan.project.name}:${suffix}`;
+}
+
+function availableOf(plan: ProjectPlan, stepId: string): Capability | undefined {
+  return plan.detection?.capabilities[stepId];
+}
+
+/** Tools every available capability of the plan needs, with the qualified steps that need them. */
+function toolsNeeded(plan: ProjectPlan): Map<string, string[]> {
+  const needed = new Map<string, string[]>();
+  for (const stepId of plan.project.pipeline) {
+    const qid = qualifiedPipeline(plan)[plan.project.pipeline.indexOf(stepId)]!;
+    const scripted = Object.hasOwn(plan.project.steps, stepId);
+    if (scripted) {
+      const manager = plan.scriptHost?.packageManager;
+      if (manager) needed.set(manager, [...(needed.get(manager) ?? []), qid]);
+      continue;
+    }
+    const capability = availableOf(plan, stepId);
+    if (capability?.state !== 'available') continue;
+    for (const requirement of capability.requires) {
+      if (requirement.kind === 'tool') needed.set(requirement.name, [...(needed.get(requirement.name) ?? []), qid]);
+    }
+  }
+  return needed;
+}
+
+async function toolDiagnostics(plan: ProjectPlan, options: EcosystemDiagnosticOptions): Promise<Diagnostic[]> {
+  if (options.skipToolProbes) return [];
+  const probe = options.probe ?? ((name: string) => probeTool(name));
+  const diagnostics: Diagnostic[] = [];
+
+  for (const [tool, steps] of toolsNeeded(plan)) {
+    const result = await probe(tool);
+    const base = { id: id(plan, `tool:${tool}`), label: `${label(plan)}: ${tool}`, category: 'environment' as const, steps };
+    if (result.outcome === 'ok') {
+      diagnostics.push({ ...base, severity: 'PASS', detail: `${tool} ${result.version ?? '(version unknown)'}` });
+    } else if (result.outcome === 'blocked') {
+      // The check itself was not permitted. That is a fact about the check, not
+      // about the tool, so it is UNKNOWN and the step is allowed to try.
+      diagnostics.push({
+        ...base,
+        severity: 'UNKNOWN',
+        detail: result.detail,
+        recommendation: `${tool} could not be probed, so this check is unverified rather than passing.`,
+      });
+    } else {
+      diagnostics.push({
+        ...base,
+        severity: 'BLOCKED',
+        detail: `Project "${label(plan)}" needs ${tool}, but ${tool} was not found on PATH.`,
+        recommendation: `Install ${tool}. Only the steps of project "${label(plan)}" that need it are blocked.`,
+      });
+    }
+  }
+  return diagnostics;
+}
+
+function nodeRuntimeDiagnostics(plan: ProjectPlan): Diagnostic[] {
+  const host = plan.scriptHost;
+  if (host === null) return [];
+  const engines = (host.manifest['engines'] as { node?: unknown } | undefined)?.node;
+  if (typeof engines !== 'string') return [];
+
+  const steps = qualifiedPipeline(plan);
+  const verdict = satisfies(process.versions.node, engines);
+  const base = { id: id(plan, 'node-version'), label: `${label(plan)}: Node version`, category: 'environment' as const, steps };
+  if (verdict.verdict === 'satisfied') {
+    return [{ ...base, severity: 'PASS', detail: `Node ${process.versions.node} satisfies ${engines}.` }];
+  }
+  if (verdict.verdict === 'violated') {
+    return [
+      {
+        ...base,
+        severity: 'BLOCKED',
+        detail: `Node ${process.versions.node} does not satisfy ${engines} (engines.node of project "${label(plan)}").`,
+        recommendation: `Switch to a Node version matching ${engines}.`,
+      },
+    ];
+  }
+  return [
+    {
+      ...base,
+      severity: 'UNKNOWN',
+      detail: `engines.node "${engines}" could not be evaluated: ${verdict.reason ?? 'unsupported syntax'}.`,
+      recommendation: 'Verify the Node version manually. local-ci-runner will not claim a compatibility it could not check.',
+    },
+  ];
+}
+
+function declaresDependencies(plan: ProjectPlan): boolean {
+  const host = plan.scriptHost;
+  return host !== null && Object.keys(host.dependencies).length + Object.keys(host.devDependencies).length > 0;
+}
+
+function stepDiagnostics(plan: ProjectPlan): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  const qids = qualifiedPipeline(plan);
+  const pipeline = plan.project.pipeline;
+  const host = plan.scriptHost;
+
+  /** True when an install-style step runs before `index` and can provide the dependencies. */
+  const installBefore = (index: number): boolean =>
+    pipeline.slice(0, index).some((stepId) => {
+      if (stepId !== 'install') return false;
+      if (Object.hasOwn(plan.project.steps, stepId)) return true;
+      return availableOf(plan, stepId)?.state === 'available';
+    });
+
+  pipeline.forEach((stepId, index) => {
+    const qid = qids[index]!;
+    const stepLabel = `${label(plan)}: ${stepId}`;
+    const scripted = Object.hasOwn(plan.project.steps, stepId) ? plan.project.steps[stepId] : undefined;
+
+    if (scripted !== undefined) {
+      const exists = host !== null && Object.hasOwn(host.scripts, scripted.script) && host.scripts[scripted.script]!.trim() !== '';
+      if (!exists) {
+        diagnostics.push({
+          id: id(plan, `step:${stepId}`),
+          label: stepLabel,
+          severity: 'UNSUPPORTED',
+          category: 'pipeline',
+          detail: `package.json has no script named "${scripted.script}".`,
+          recommendation: `Add a "${scripted.script}" script to package.json, or fix the name under steps.${stepId} in .local-ci.yml. This step will report UNSUPPORTED.`,
+          steps: [qid],
+        });
+      }
+      return;
+    }
+
+    if (plan.adapter === undefined) {
+      diagnostics.push({
+        id: id(plan, `step:${stepId}`),
+        label: stepLabel,
+        severity: 'UNSUPPORTED',
+        category: 'pipeline',
+        detail: `project type "${plan.project.type}" has no built-in steps, and "${stepId}" is not defined under steps.`,
+        recommendation: 'This step will report UNSUPPORTED. Define it under steps, or use a recognised project type.',
+        steps: [qid],
+      });
+      return;
+    }
+
+    const capability = availableOf(plan, stepId);
+    if (capability === undefined) {
+      diagnostics.push({
+        id: id(plan, `step:${stepId}`),
+        label: stepLabel,
+        severity: 'UNSUPPORTED',
+        category: 'pipeline',
+        detail: `No implementation is registered for pipeline step "${stepId}" in project type "${plan.project.type}".`,
+        recommendation: `Known steps are: ${plan.adapter.stepIds().join(', ')}. This step will report UNSUPPORTED.`,
+        steps: [qid],
+      });
+      return;
+    }
+
+    if (capability.state === 'unavailable') {
+      diagnostics.push({
+        id: id(plan, `step:${stepId}`),
+        label: stepLabel,
+        severity: 'UNSUPPORTED',
+        category: 'pipeline',
+        detail: capability.reason,
+        recommendation: 'This step will report UNSUPPORTED. Add the missing script, tool or configuration to enable it.',
+        steps: [qid],
+      });
+      return;
+    }
+
+    // Installing without a lockfile would create one (and may resolve newer
+    // versions than CI). A local check must not quietly change the project.
+    if (stepId === 'install' && plan.detection?.ecosystem === 'node' && host !== null && host.lockfile === null) {
+      diagnostics.push({
+        id: id(plan, 'lockfile'),
+        label: `${label(plan)}: Lockfile`,
+        severity: 'BLOCKED',
+        category: 'project',
+        detail:
+          'No lockfile was found in this project or its workspace root. Installing without one would create a ' +
+          'lockfile and could install different versions than CI.',
+        recommendation:
+          'Generate and commit a lockfile (for example run "npm install" once yourself), or remove "install" ' +
+          'from this project\'s pipeline and install dependencies manually.',
+        steps: [qid],
+      });
+      return;
+    }
+
+    for (const requirement of capability.requires) {
+      if (requirement.kind !== 'dependencies') continue;
+      if (!declaresDependencies(plan) || plan.dependenciesOnDisk) continue;
+      if (installBefore(index)) {
+        diagnostics.push({
+          id: id(plan, `deps:${stepId}`),
+          label: stepLabel,
+          severity: 'WARNING',
+          category: 'project',
+          detail: `node_modules is missing or empty; the install step runs first and will populate it (needed: ${requirement.detail}).`,
+          steps: [qid],
+        });
+      } else {
+        diagnostics.push({
+          id: id(plan, `deps:${stepId}`),
+          label: stepLabel,
+          severity: 'BLOCKED',
+          category: 'project',
+          detail: `node_modules is missing or empty and this project's pipeline has no earlier install step (needed: ${requirement.detail}).`,
+          recommendation: 'Run your package manager install, or add an "install" step before this one.',
+          steps: [qid],
+        });
+      }
+    }
+  });
+
+  return diagnostics;
+}
+
+export async function ecosystemDiagnostics(
+  plans: readonly ProjectPlan[],
+  config: LocalCiConfig,
+  env: NodeJS.ProcessEnv,
+  options: EcosystemDiagnosticOptions = {},
+): Promise<Diagnostic[]> {
+  const diagnostics: Diagnostic[] = [];
+  let unsupported = 0;
+
+  for (const plan of plans) {
+    const qids = qualifiedPipeline(plan);
+
+    const warning = unrecognisedTypeWarning(plan.project.type);
+    if (warning) {
+      diagnostics.push({
+        id: id(plan, 'type'),
+        label: `${label(plan)}: project type`,
+        severity: 'WARNING',
+        category: 'configuration',
+        detail: warning,
+        steps: qids,
+      });
+    }
+
+    if (plan.problem !== null) {
+      diagnostics.push({
+        id: id(plan, 'detect'),
+        label: `${label(plan)}: project`,
+        severity: 'BLOCKED',
+        category: 'project',
+        detail: plan.problem,
+        recommendation: 'Set the project type and path in .local-ci.yml to match this project.',
+        steps: qids,
+      });
+      continue;
+    }
+
+    if (plan.detection) {
+      diagnostics.push({
+        id: id(plan, 'detect'),
+        label: `${label(plan)}: project`,
+        severity: 'PASS',
+        category: 'project',
+        detail: `Detected ${plan.detection.ecosystem} project (${plan.detection.evidence.join(', ')}).`,
+      });
+    }
+
+    diagnostics.push(...nodeRuntimeDiagnostics(plan));
+    diagnostics.push(...(await toolDiagnostics(plan, options)));
+    const steps = stepDiagnostics(plan);
+    unsupported += steps.filter((d) => d.severity === 'UNSUPPORTED').length;
+    diagnostics.push(...steps);
+  }
+
+  const total = plans.reduce((sum, plan) => sum + plan.project.pipeline.length, 0);
+  diagnostics.push(
+    unsupported === 0
+      ? {
+          id: 'pipeline',
+          label: 'Pipeline',
+          severity: 'PASS',
+          category: 'pipeline',
+          detail: `All ${total} configured step(s) have an implementation for their project.`,
+        }
+      : {
+          id: 'pipeline',
+          label: 'Pipeline',
+          severity: 'WARNING',
+          category: 'pipeline',
+          detail: `${unsupported} configured step(s) have no implementation and will report UNSUPPORTED, which fails the run.`,
+          recommendation: 'Remove the unsupported steps, or accept that the run will report UNSUPPORTED and exit non-zero.',
+        },
+  );
+
+  const required = requiredEnvironmentVariables(config);
+  const missing = required.filter((name) => !(name in env) || env[name] === '');
+  if (required.length === 0) {
+    diagnostics.push({ id: 'env-vars', label: 'Environment variables', severity: 'PASS', category: 'requirements', detail: 'This configuration declares no required environment variables.' });
+  } else if (missing.length === 0) {
+    diagnostics.push({ id: 'env-vars', label: 'Environment variables', severity: 'PASS', category: 'requirements', detail: 'All required environment variables are present.' });
+  } else {
+    diagnostics.push({
+      id: 'env-vars',
+      label: 'Environment variables',
+      severity: 'BLOCKED',
+      category: 'requirements',
+      detail: `Required environment variable(s) not set: ${missing.join(', ')}.`,
+      recommendation: `Set ${missing.join(', ')} before running the pipeline. local-ci-runner reports presence only and never reads or prints their values.`,
+    });
+  }
+
+  return diagnostics;
+}

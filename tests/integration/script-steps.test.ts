@@ -384,7 +384,8 @@ describe('script steps: unsupported project types keep their old behaviour', () 
 
   it('reports nothing as passed when a non-Angular config scripts no steps', async () => {
     await withTempProject(async (cwd) => {
-      await project(cwd, { build: node('0') }, 'version: 1\nproject:\n  type: node\npipeline:\n  - build\n');
+      // An unrecognised type keeps the 0.2.x behaviour: only `steps:` entries run.
+      await project(cwd, { build: node('0') }, 'version: 1\nproject:\n  type: custom-thing\npipeline:\n  - build\n');
       expect(await runCommand(cwd, options)).toBe(1);
       expect(stepOf((await lastReport(cwd)).report, 'build').status).toBe('UNSUPPORTED');
     });

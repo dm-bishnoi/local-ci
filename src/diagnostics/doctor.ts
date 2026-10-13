@@ -20,6 +20,7 @@ import { resolveStep, supportedStepIds } from '../adapters/angular/commands.js';
 import { requiredEnvironmentVariables } from '../config/schema.js';
 import { formatTimeout } from '../core/step-runner.js';
 import { collectProjectFacts, type ProjectFacts } from './facts.js';
+import { ecosystemDiagnostics } from '../ecosystems/diagnostics.js';
 import { hasProjectScript } from './preflight.js';
 import type { Diagnostic } from './types.js';
 
@@ -536,14 +537,33 @@ export async function runDoctorChecks(cwd: string, options: DoctorOptions = {}):
     ? await noToolProbes()
     : await environmentDiagnostics((name, args) => probeTool(name, args));
 
+  const osDiagnostic: Diagnostic = {
+    id: 'os',
+    label: 'Operating system',
+    severity: 'PASS',
+    category: 'environment',
+    detail: `${process.platform} ${process.arch}`,
+  };
+
+  if (facts.plans !== null && facts.config.config !== null) {
+    return [
+      osDiagnostic,
+      ...toolDiagnostics,
+      {
+        id: 'config',
+        label: '.local-ci.yml',
+        severity: 'PASS',
+        category: 'configuration',
+        detail: `Valid configuration with ${facts.plans.length} project(s) and ${facts.config.config.pipeline.length} pipeline step(s).`,
+      },
+      ...(await ecosystemDiagnostics(facts.plans, facts.config.config, env, {
+        ...(options.skipToolProbes !== undefined ? { skipToolProbes: options.skipToolProbes } : {}),
+      })),
+    ];
+  }
+
   return [
-    {
-      id: 'os',
-      label: 'Operating system',
-      severity: 'PASS',
-      category: 'environment',
-      detail: `${process.platform} ${process.arch}`,
-    },
+    osDiagnostic,
     runtimeDiagnostic(facts),
     ...toolDiagnostics,
     await browserDiagnostic(facts, options.browsers),
