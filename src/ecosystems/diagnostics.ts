@@ -3,7 +3,7 @@ import { prepareRunStep, type PrepareOptions } from '../core/run-step.js';
 import type { Diagnostic } from '../diagnostics/types.js';
 import { satisfies } from '../env/semver.js';
 import { probeExecutable, probeTool, type ProbeResult } from '../env/tools.js';
-import { qualifiedPipeline, type ProjectPlan } from './plan.js';
+import { qualifiedPipeline, scriptCapabilityFor, type ProjectPlan } from './plan.js';
 import { unrecognisedTypeWarning } from './registry.js';
 import type { Capability } from './types.js';
 
@@ -50,7 +50,7 @@ export async function runStepDiagnostic(input: {
 export interface EcosystemDiagnosticOptions {
   skipToolProbes?: boolean;
   /** Substitutes the tool probe. Used by tests. */
-  probe?: (name: string, args?: readonly string[], locateOnly?: boolean) => Promise<ProbeResult>;
+  probe?: (name: string, args?: readonly string[], locateOnly?: boolean, env?: Record<string, string>) => Promise<ProbeResult>;
 }
 
 function label(plan: ProjectPlan): string {
@@ -68,6 +68,8 @@ function availableOf(plan: ProjectPlan, stepId: string): Capability | undefined 
 
 interface NeededTool {
   name: string;
+  display?: string;
+  env?: Record<string, string>;
   probeArgs?: string[];
   locateOnly?: boolean;
   steps: string[];
@@ -77,11 +79,25 @@ interface NeededTool {
 /** Tools every available capability of the plan needs, with the qualified steps that need them. */
 function toolsNeeded(plan: ProjectPlan): Map<string, NeededTool> {
   const needed = new Map<string, NeededTool>();
-  const entry = (name: string, probeArgs: string[] | undefined, locateOnly: boolean | undefined): NeededTool => {
+  const entry = (
+    name: string,
+    probeArgs: string[] | undefined,
+    locateOnly: boolean | undefined,
+    display?: string,
+    env?: Record<string, string>,
+  ): NeededTool => {
     const key = `${name}|${(probeArgs ?? []).join(' ')}|${locateOnly ? 'locate' : 'run'}`;
     let tool = needed.get(key);
     if (!tool) {
-      tool = { name, ...(probeArgs ? { probeArgs } : {}), ...(locateOnly ? { locateOnly } : {}), steps: [], versions: [] };
+      tool = {
+        name,
+        ...(display ? { display } : {}),
+        ...(env ? { env } : {}),
+        ...(probeArgs ? { probeArgs } : {}),
+        ...(locateOnly ? { locateOnly } : {}),
+        steps: [],
+        versions: [],
+      };
       needed.set(key, tool);
     }
     return tool;
@@ -90,17 +106,23 @@ function toolsNeeded(plan: ProjectPlan): Map<string, NeededTool> {
   for (const [index, stepId] of plan.project.pipeline.entries()) {
     const qid = qualifiedPipeline(plan)[index]!;
     const definition = Object.hasOwn(plan.project.steps, stepId) ? plan.project.steps[stepId] : undefined;
+    if (definition !== undefined && isRunStep(definition)) continue;
+    let capability: Capability | undefined;
     if (definition !== undefined) {
-      if (isRunStep(definition)) continue;
-      const manager = plan.scriptHost?.packageManager;
-      if (manager) entry(manager, undefined, undefined).steps.push(qid);
-      continue;
+      // package.json scripts only need the package manager; other ecosystems may map a script to a command.
+      capability = scriptCapabilityFor(plan, definition.script) ?? undefined;
+      if (capability === undefined) {
+        const manager = plan.scriptHost?.packageManager;
+        if (manager) entry(manager, undefined, undefined).steps.push(qid);
+        continue;
+      }
+    } else {
+      capability = availableOf(plan, stepId);
     }
-    const capability = availableOf(plan, stepId);
     if (capability?.state !== 'available') continue;
     for (const requirement of capability.requires) {
       if (requirement.kind === 'tool') {
-        entry(requirement.name, requirement.probeArgs, requirement.locateOnly).steps.push(qid);
+        entry(requirement.name, requirement.probeArgs, requirement.locateOnly, requirement.display, requirement.env).steps.push(qid);
       } else if (requirement.kind === 'version') {
         const tool = entry(requirement.tool, requirement.probeArgs, undefined);
         const existing = tool.versions.find((v) => v.atLeast === requirement.atLeast && v.source === requirement.source);
@@ -116,13 +138,16 @@ async function toolDiagnostics(plan: ProjectPlan, options: EcosystemDiagnosticOp
   if (options.skipToolProbes) return [];
   const probe =
     options.probe ??
-    ((name: string, args?: readonly string[], locateOnly?: boolean) =>
-      locateOnly ? probeExecutable(name) : probeTool(name, args ?? ['--version']));
+    ((name: string, args?: readonly string[], locateOnly?: boolean, env?: Record<string, string>) =>
+      locateOnly ? probeExecutable(name) : probeTool(name, args ?? ['--version'], env ? { env } : {}));
   const diagnostics: Diagnostic[] = [];
 
   for (const tool of toolsNeeded(plan).values()) {
-    const result = await probe(tool.name, tool.probeArgs, tool.locateOnly);
-    const base = { id: id(plan, `tool:${tool.name}`), label: `${label(plan)}: ${tool.name}`, category: 'environment' as const, steps: tool.steps };
+    const result = await probe(tool.name, tool.probeArgs, tool.locateOnly, tool.env);
+    const shown = tool.display ?? tool.name;
+    const base = {
+      id: id(plan, `tool:${tool.name}${tool.probeArgs ? `:${tool.probeArgs.join(' ')}` : ''}`),
+      label: `${label(plan)}: ${shown}`, category: 'environment' as const, steps: tool.steps };
     if (result.outcome === 'ok') {
       const known = result.version !== undefined && result.version !== 'unknown';
       diagnostics.push({ ...base, severity: 'PASS', detail: known ? `${tool.name} ${result.version}` : `${tool.name} found on PATH` });
@@ -165,8 +190,10 @@ async function toolDiagnostics(plan: ProjectPlan, options: EcosystemDiagnosticOp
       diagnostics.push({
         ...base,
         severity: 'BLOCKED',
-        detail: `Project "${label(plan)}" needs ${tool.name}, but ${tool.name} was not found on PATH.`,
-        recommendation: `Install ${tool.name}. Only the steps of project "${label(plan)}" that need it are blocked.`,
+        detail: tool.display
+          ? `Project "${label(plan)}" needs ${shown}, but it is not available (${result.detail}).`
+          : `Project "${label(plan)}" needs ${tool.name}, but ${tool.name} was not found on PATH.`,
+        recommendation: `Install ${shown}. Only the steps of project "${label(plan)}" that need it are blocked.`,
       });
     }
   }
@@ -206,6 +233,7 @@ function nodeRuntimeDiagnostics(plan: ProjectPlan): Diagnostic[] {
 }
 
 function declaresDependencies(plan: ProjectPlan): boolean {
+  if (plan.detection?.declaresDependencies !== undefined) return plan.detection.declaresDependencies;
   const host = plan.scriptHost;
   return host !== null && Object.keys(host.dependencies).length + Object.keys(host.devDependencies).length > 0;
 }
@@ -215,11 +243,12 @@ async function stepDiagnostics(plan: ProjectPlan): Promise<Diagnostic[]> {
   const qids = qualifiedPipeline(plan);
   const pipeline = plan.project.pipeline;
   const host = plan.scriptHost;
+  const dependenciesLabel = plan.detection?.dependenciesLabel ?? 'node_modules';
 
   /** True when an install-style step runs before `index` and can provide the dependencies. */
   const installBefore = (index: number): boolean =>
     pipeline.slice(0, index).some((stepId) => {
-      if (stepId !== 'install') return false;
+      if (!(plan.detection?.installStepIds ?? ['install']).includes(stepId)) return false;
       if (Object.hasOwn(plan.project.steps, stepId)) return true;
       return availableOf(plan, stepId)?.state === 'available';
     });
@@ -245,6 +274,22 @@ async function stepDiagnostics(plan: ProjectPlan): Promise<Diagnostic[]> {
     }
 
     if (scripted !== undefined) {
+      const mapped = scriptCapabilityFor(plan, scripted.script);
+      if (mapped !== null) {
+        // An ecosystem with its own notion of "script" (composer) or none at all.
+        if (mapped.state === 'unavailable') {
+          diagnostics.push({
+            id: id(plan, `step:${stepId}`),
+            label: stepLabel,
+            severity: 'UNSUPPORTED',
+            category: 'pipeline',
+            detail: mapped.reason,
+            recommendation: `Fix steps.${stepId} in .local-ci.yml. This step will report UNSUPPORTED.`,
+            steps: [qid],
+          });
+        }
+        continue;
+      }
       const exists = host !== null && Object.hasOwn(host.scripts, scripted.script) && host.scripts[scripted.script]!.trim() !== '';
       if (!exists) {
         diagnostics.push({
@@ -328,7 +373,7 @@ async function stepDiagnostics(plan: ProjectPlan): Promise<Diagnostic[]> {
           label: stepLabel,
           severity: 'WARNING',
           category: 'project',
-          detail: `node_modules is missing or empty; the install step runs first and will populate it (needed: ${requirement.detail}).`,
+          detail: `${dependenciesLabel} is missing or empty; the install step runs first and will populate it (needed: ${requirement.detail}).`,
           steps: [qid],
         });
       } else {
@@ -337,8 +382,8 @@ async function stepDiagnostics(plan: ProjectPlan): Promise<Diagnostic[]> {
           label: stepLabel,
           severity: 'BLOCKED',
           category: 'project',
-          detail: `node_modules is missing or empty and this project's pipeline has no earlier install step (needed: ${requirement.detail}).`,
-          recommendation: 'Run your package manager install, or add an "install" step before this one.',
+          detail: `${dependenciesLabel} is missing or empty and this project's pipeline has no earlier install step (needed: ${requirement.detail}).`,
+          recommendation: 'Install the dependencies yourself, or add an install step before this one.',
           steps: [qid],
         });
       }
@@ -393,6 +438,15 @@ export async function ecosystemDiagnostics(
         category: 'project',
         detail: `Detected ${plan.detection.ecosystem} project (${plan.detection.evidence.join(', ')}).`,
       });
+      for (const [index, warning] of (plan.detection.warnings ?? []).entries()) {
+        diagnostics.push({
+          id: id(plan, `note:${index + 1}`),
+          label: `${label(plan)}: note`,
+          severity: 'WARNING',
+          category: 'project',
+          detail: warning,
+        });
+      }
     }
 
     diagnostics.push(...nodeRuntimeDiagnostics(plan));

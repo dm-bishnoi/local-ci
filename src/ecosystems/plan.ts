@@ -7,7 +7,7 @@ import { StepRegistry } from '../core/step-runner.js';
 import { detectNode, type NodeDetection } from './node/detect.js';
 import { adapterFor } from './registry.js';
 import { createCapabilityStep } from './steps.js';
-import type { Detection, EcosystemAdapter } from './types.js';
+import type { Capability, Detection, EcosystemAdapter } from './types.js';
 
 /**
  * One configured project, resolved against the file system.
@@ -46,6 +46,22 @@ export function usesEcosystemPath(config: LocalCiConfig): boolean {
   return type !== 'angular' && adapterFor(type) !== undefined;
 }
 
+/**
+ * What `steps.<id>.script` means for a project. Node projects use package.json
+ * scripts (handled by the caller, which gets `null` here); ecosystems with a
+ * script concept of their own (composer) provide `resolveScript`; every other
+ * ecosystem says plainly that `run:` is the way to run a custom command.
+ */
+export function scriptCapabilityFor(plan: ProjectPlan, script: string): Capability | null {
+  const adapter = plan.adapter;
+  if (adapter === undefined || adapter.id === 'node' || plan.detection === null) return null;
+  if (adapter.resolveScript) return adapter.resolveScript(script, plan.detection);
+  return {
+    state: 'unavailable',
+    reason: `"script" runs a package.json script, which a ${adapter.id} project does not have. Use run: [command, ...args] to run a custom command.`,
+  };
+}
+
 export function qualifiedPipeline(plan: ProjectPlan): string[] {
   return plan.project.pipeline.map((id) => qualifyStepId(plan.project.name, id));
 }
@@ -57,6 +73,7 @@ export function stepDisplayName(plan: ProjectPlan, id: string): string {
 }
 
 export async function planProjects(root: string, config: LocalCiConfig): Promise<ProjectPlan[]> {
+  const offline = config.settings.offline === true;
   const plans: ProjectPlan[] = [];
 
   for (const project of normalizeProjects(config)) {
@@ -69,7 +86,7 @@ export async function planProjects(root: string, config: LocalCiConfig): Promise
       continue;
     }
 
-    const detection = adapter ? await adapter.detect(resolved.dir) : null;
+    const detection = adapter ? await adapter.detect(resolved.dir, { offline }) : null;
     if (detection && !detection.detected) {
       plans.push({
         project,
@@ -83,6 +100,11 @@ export async function planProjects(root: string, config: LocalCiConfig): Promise
       continue;
     }
 
+    if (detection?.problem) {
+      plans.push({ project, dir: resolved.dir, adapter, detection, scriptHost: null, problem: `Project "${label}": ${detection.problem}`, dependenciesOnDisk: false });
+      continue;
+    }
+
     const scriptHost = detection?.ecosystem === 'node' ? (detection as NodeDetection) : await detectNode(resolved.dir);
     plans.push({
       project,
@@ -91,7 +113,7 @@ export async function planProjects(root: string, config: LocalCiConfig): Promise
       detection,
       scriptHost: scriptHost.detected ? scriptHost : null,
       problem: null,
-      dependenciesOnDisk: scriptHost.detected ? scriptHost.dependenciesOnDisk : false,
+      dependenciesOnDisk: detection?.dependenciesOnDisk ?? (scriptHost.detected ? scriptHost.dependenciesOnDisk : false),
     });
   }
   return plans;
@@ -152,6 +174,18 @@ export function buildProjectRegistry(
             name,
             definition: scripted,
             projectDir: plan.dir,
+            ...(options.exec !== undefined ? { exec: options.exec } : {}),
+          }),
+        );
+        continue;
+      }
+
+      if (scripted !== undefined && 'script' in scripted && scriptCapabilityFor(plan, scripted.script) !== null) {
+        registry.register(
+          createCapabilityStep(qid, scriptCapabilityFor(plan, scripted.script)!, {
+            name,
+            cwd: plan.dir,
+            ...(scripted.timeoutMs !== undefined ? { timeoutMs: scripted.timeoutMs } : {}),
             ...(options.exec !== undefined ? { exec: options.exec } : {}),
           }),
         );

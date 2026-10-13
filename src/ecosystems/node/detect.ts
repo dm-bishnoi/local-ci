@@ -142,6 +142,17 @@ export async function detectNode(dir: string): Promise<NodeDetection> {
   for (const framework of frameworks) evidence.push(`framework: ${framework}`);
 
   const detected = manifest !== null;
+  const warnings: string[] = [];
+  if (lockfilesFound.length > 1) {
+    warnings.push(
+      `More than one lockfile was found (${lockfilesFound.join(', ')}); ${lockfile ?? lockfilesFound[0]} decides the package manager (${manager}). Remove the ones you do not use.`,
+    );
+  }
+  if (detected && declaredPackageManager !== null && lockfile !== null && declaredPackageManager !== manager) {
+    warnings.push(
+      `package.json declares ${String(manifest?.['packageManager'])} but ${lockfile} implies ${manager}; ${manager} is used.`,
+    );
+  }
   return {
     ecosystem: 'node',
     root,
@@ -161,6 +172,7 @@ export async function detectNode(dir: string): Promise<NodeDetection> {
     yarnBerry,
     frameworks,
     typescript,
+    ...(warnings.length > 0 ? { warnings } : {}),
     angularConfig: files.has('angular.json') ? join(root, 'angular.json') : null,
     scripts: asStringRecord(manifest?.['scripts']),
     dependencies,
@@ -170,6 +182,9 @@ export async function detectNode(dir: string): Promise<NodeDetection> {
     tsconfig,
     declaredPackageManager,
     dependenciesOnDisk: manifest !== null && (await nodeModulesPresent(root)),
+    declaresDependencies: Object.keys(dependencies).length + Object.keys(devDependencies).length > 0,
+    dependenciesLabel: 'node_modules',
+    installStepIds: ['install'],
   };
 }
 

@@ -9,6 +9,7 @@ import { localCiConfigSchema, projectPathSchema } from '../../config/schema.js';
 import { DEFAULT_SCAN_DEPTH, MAX_SCAN_DEPTH, discoverProjects, type DiscoveryResult } from '../../ecosystems/discovery.js';
 import { ADAPTERS, adapterFor, knownProjectTypes } from '../../ecosystems/registry.js';
 import type { Detection, EcosystemAdapter } from '../../ecosystems/types.js';
+import { probeExecutable, probeTool } from '../../env/tools.js';
 import { REPORT_ROOT_GITIGNORE, ensureReportRootIgnored } from '../../reporters/artifact.js';
 
 /** The default Angular pipeline, in the order the steps run. */
@@ -127,8 +128,56 @@ function renderMulti(projects: readonly GeneratedProject[], header: readonly str
   return lines.join('\n');
 }
 
-function generate(name: string, type: string, path: string, adapter: EcosystemAdapter, detection: Detection): GeneratedProject {
-  const { pipeline, omitted } = adapter.defaultPipeline(detection);
+/**
+ * Leaves out steps whose tools are not on this machine ("do not generate
+ * commands for tools that are absent"). A probe that could not run keeps the
+ * step: an unverified tool is not a missing one. Node projects are exempt,
+ * because their package manager is the project's own choice and a machine
+ * without it should be told so by preflight, not get an empty pipeline.
+ */
+async function withoutMissingTools(
+  adapter: EcosystemAdapter,
+  detection: Detection,
+  chosen: { pipeline: string[]; omitted: OmittedStep[] },
+): Promise<{ pipeline: string[]; omitted: OmittedStep[] }> {
+  if (adapter.id === 'node') return chosen;
+
+  const cache = new Map<string, Promise<{ outcome: string; detail: string }>>();
+  const probe = (name: string, args: readonly string[] | undefined, locateOnly: boolean | undefined, env: Record<string, string> | undefined) => {
+    const key = `${name}|${(args ?? []).join(' ')}|${locateOnly ? 'l' : 'r'}`;
+    if (!cache.has(key)) cache.set(key, locateOnly ? probeExecutable(name) : probeTool(name, args ?? ['--version'], env ? { env } : {}));
+    return cache.get(key)!;
+  };
+
+  const pipeline: string[] = [];
+  const omitted = [...chosen.omitted];
+  for (const id of chosen.pipeline) {
+    const capability = detection.capabilities[id];
+    let missing: string | null = null;
+    if (capability?.state === 'available') {
+      for (const requirement of capability.requires) {
+        if (requirement.kind !== 'tool') continue;
+        const result = await probe(requirement.name, requirement.probeArgs, requirement.locateOnly, requirement.env);
+        if (result.outcome === 'missing') {
+          missing = `${requirement.display ?? requirement.name} was not found on this machine. Install it, then add "${id}".`;
+          break;
+        }
+      }
+    }
+    if (missing === null) pipeline.push(id);
+    else omitted.push({ id, reason: missing });
+  }
+  return { pipeline, omitted };
+}
+
+async function generate(
+  name: string,
+  type: string,
+  path: string,
+  adapter: EcosystemAdapter,
+  detection: Detection,
+): Promise<GeneratedProject> {
+  const { pipeline, omitted } = await withoutMissingTools(adapter, detection, adapter.defaultPipeline(detection));
   if (pipeline.length === 0) {
     throw new InitError(
       `No runnable checks were found for "${path === '.' ? type : path}" (${type}). Nothing was written.\n` +
@@ -231,16 +280,17 @@ async function buildPlan(cwd: string, options: InitOptions): Promise<InitPlan> {
     }
 
     const type = options.type?.toLowerCase() ?? adapter.suggestType?.(detection) ?? adapter.id;
-    const generated = generate('project', type, projectPath, adapter, detection);
+    const generated = await generate('project', type, projectPath, adapter, detection);
     return { text: renderSingle(generated, notes), omitted: generated.omitted, notes };
   }
 
   if (options.all) {
     if (discovery.projects.length === 0) throw new InitError('No supported projects were found to write. Nothing was written.');
-    const generated = discovery.projects.map((project) => {
+    const generated: GeneratedProject[] = [];
+    for (const project of discovery.projects) {
       const adapter = ADAPTERS.find((candidate) => candidate.id === project.ecosystem)!;
-      return generate(project.name, project.type, project.path, adapter, project.detection);
-    });
+      generated.push(await generate(project.name, project.type, project.path, adapter, project.detection));
+    }
     return { text: renderMulti(generated, notes), omitted: generated.flatMap((entry) => entry.omitted), notes };
   }
 
@@ -270,7 +320,7 @@ async function buildPlan(cwd: string, options: InitOptions): Promise<InitPlan> {
     return { text: legacy.text, omitted: legacy.omitted, notes };
   }
   const adapter = ADAPTERS.find((candidate) => candidate.id === only.ecosystem)!;
-  const generated = generate(only.name, only.type, only.path, adapter, only.detection);
+  const generated = await generate(only.name, only.type, only.path, adapter, only.detection);
   return { text: renderSingle(generated, notes), omitted: generated.omitted, notes };
 }
 

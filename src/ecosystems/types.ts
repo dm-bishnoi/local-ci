@@ -31,6 +31,10 @@ export type Requirement =
       probeArgs?: string[];
       /** The tool has no version output (gofmt): only check that it is on PATH. */
       locateOnly?: boolean;
+      /** What to call it in messages when the executable alone is not the point ("pytest (python -m pytest)"). */
+      display?: string;
+      /** Constant environment for the probe, e.g. RUSTUP_AUTO_INSTALL=0. */
+      env?: Record<string, string>;
     }
   /** The installed `tool` must be at least `atLeast`, as required by `source` (e.g. go.mod). */
   | { kind: 'version'; tool: string; atLeast: string; source: string; probeArgs?: string[] }
@@ -62,6 +66,11 @@ export interface UnavailableCapability {
 
 export type Capability = AvailableCapability | UnavailableCapability;
 
+export interface DetectOptions {
+  /** `settings.offline`: adapters add their tool's offline flag where it has one. */
+  offline?: boolean;
+}
+
 export interface Detection {
   ecosystem: EcosystemId;
   /** Absolute project directory. */
@@ -72,6 +81,22 @@ export interface Detection {
   /** Always present when `detected` is false. */
   reason?: string;
   capabilities: Record<string, Capability>;
+  /**
+   * Detected, but not runnable until the user resolves something (two solutions
+   * in one directory, a wrapper that is not executable). Every step of the
+   * project is reported BLOCKED with this text.
+   */
+  problem?: string;
+  /** Facts that do not block anything but the user should know (a missing lock file, a conflicting package manager). */
+  warnings?: string[];
+  /** Dependencies (node_modules, NuGet assets, vendor/) are present on disk. */
+  dependenciesOnDisk?: boolean;
+  /** The project declares dependencies at all; when false, missing ones are not a problem. */
+  declaresDependencies?: boolean;
+  /** What dependencies are called in messages ("node_modules"). */
+  dependenciesLabel?: string;
+  /** Step ids that populate dependencies. Defaults to `install`. */
+  installStepIds?: readonly string[];
 }
 
 /** Members a project declares for itself (npm workspaces, go.work, Cargo workspace, ...). */
@@ -93,7 +118,9 @@ export interface EcosystemAdapter {
   /** Config-facing type names handled by this adapter (lower case). */
   profiles: readonly string[];
   /** Read-only. Never installs, mutates or probes the network. */
-  detect(dir: string): Promise<Detection>;
+  detect(dir: string, options?: DetectOptions): Promise<Detection>;
+  /** What `steps.<id>.script` means for this ecosystem, if anything (composer scripts for PHP). */
+  resolveScript?(script: string, detection: Detection): Capability;
   stepIds(): readonly string[];
   stepName(id: string): string;
   /** The `project.type` to write for a detection; defaults to the ecosystem id. */

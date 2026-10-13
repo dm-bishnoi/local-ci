@@ -86,7 +86,11 @@ function extractVersionStrict(output: string): string | undefined {
  * Executing the tool is preferred over a bare `where`/`which` because it yields
  * the version too, and a version is what makes a diagnostic actionable.
  */
-export async function probeTool(name: string, versionArgs: readonly string[] = ['--version']): Promise<ProbeResult> {
+export async function probeTool(
+  name: string,
+  versionArgs: readonly string[] = ['--version'],
+  options: { env?: NodeJS.ProcessEnv } = {},
+): Promise<ProbeResult> {
   try {
     // On Windows, npm/pnpm/yarn are `.cmd` shims, and a `.cmd` file cannot be
     // spawned directly — Node refuses without a shell. The whole invocation is
@@ -95,24 +99,35 @@ export async function probeTool(name: string, versionArgs: readonly string[] = [
     // comes from this module's callers' fixed vocabulary and the arguments are
     // constants, never configuration or user input. Without this, every package
     // manager would read as ENOENT on Windows while `git` (a real .exe) passed.
-    const useShell = process.platform === 'win32';
-    const { stdout } = useShell
+    //
+    // A name that is a path (a project's virtual-environment interpreter, say)
+    // is a real executable, may contain spaces or shell metacharacters, and is
+    // therefore never given to a shell.
+    const useShell = process.platform === 'win32' && !/[\\/]/.test(name);
+    const env = options.env ? { ...process.env, ...options.env } : undefined;
+    const { stdout, stderr } = useShell
       ? await execFileAsync([name, ...versionArgs].join(' '), {
           timeout: PROBE_TIMEOUT_MS,
           windowsHide: true,
           maxBuffer: 64 * 1024,
           shell: true,
+          ...(env ? { env } : {}),
         })
       : await execFileAsync(name, [...versionArgs], {
           timeout: PROBE_TIMEOUT_MS,
           windowsHide: true,
           maxBuffer: 64 * 1024,
+          ...(env ? { env } : {}),
         });
-    const version = extractVersion(String(stdout));
+    // `java -version` writes to stderr even on success.
+    const version = extractVersion(String(stdout)) ?? extractVersionStrict(String(stderr));
     return version
       ? { outcome: 'ok', version, detail: version }
       : { outcome: 'ok', version: 'unknown', detail: `${name} responded but printed no recognizable version.` };
   } catch (error) {
+    // The executable does not exist: a definite answer, not an unverified one.
+    if (errorCode(error) === 'ENOENT') return { outcome: 'missing', detail: `${name} was not found on PATH.` };
+
     if (isSpawnFailure(error)) {
       const code = errorCode(error);
       const blocked = code === 'EPERM' || code === 'EACCES';

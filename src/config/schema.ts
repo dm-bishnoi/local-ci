@@ -27,6 +27,11 @@ export const settingsSchema = z
      * {@link effectiveTimeoutMs}.
      */
     timeoutMs: z.number().int().positive().max(MAX_TIMEOUT_MS).optional(),
+    /**
+     * Ask tools that have an offline mode to use it (cargo `--offline`, Gradle
+     * `--offline`, Maven `-o`). Tools without one ignore it.
+     */
+    offline: z.boolean().optional(),
   })
   .strict();
 
