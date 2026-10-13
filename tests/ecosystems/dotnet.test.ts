@@ -262,7 +262,8 @@ process.exit(145);
         expect(await runCommand(cwd, { browsers: NO_BROWSERS })).toBe(1);
         const report = await lastReport(cwd);
         expect(report.steps.every((s) => s.status === 'BLOCKED')).toBe(true);
-        expect(report.steps[0]!.error).toMatch(/needs dotnet, but dotnet was not found/);
+        // It is on PATH but unusable, and the message says exactly that, quoting dotnet itself.
+        expect(report.steps[0]!.error).toMatch(/needs dotnet, but it is not available \(dotnet was found, but "dotnet --version" did not report a version: The command could not be loaded/);
       });
     });
   }, 120_000);

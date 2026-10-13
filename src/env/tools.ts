@@ -173,7 +173,17 @@ export async function probeTool(
     const version = extractVersionStrict(stderr) ?? extractVersionStrict(stdout);
     if (version) return { outcome: 'ok', version, detail: version };
 
-    return { outcome: 'missing', detail: `${name} was not found on PATH.` };
+    // The executable exists (a bare name was resolved above, a path got past
+    // ENOENT) but did not report a version, so it cannot be trusted to work.
+    const firstLine =
+      [stderr, stdout]
+        .flatMap((text) => text.split(/\r?\n/))
+        .map((line) => line.trim())
+        .find((line) => line.length > 0) ?? '';
+    return {
+      outcome: 'missing',
+      detail: `${name} was found, but "${name} ${versionArgs.join(' ')}" did not report a version${firstLine ? `: ${firstLine.slice(0, 200)}` : ''}.`,
+    };
   }
 }
 
