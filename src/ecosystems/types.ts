@@ -110,7 +110,11 @@ export interface WorkspaceMembers {
 export interface DefaultPipeline {
   pipeline: string[];
   /** Steps left out, each with the reason; written into the generated file as comments. */
-  omitted: Array<{ id: string; reason: string }>;
+  /**
+   * `onlyIf` marks an explanatory note ("build is part of verify") that only makes
+   * sense while that other step is in the final pipeline; `init` drops it otherwise.
+   */
+  omitted: Array<{ id: string; reason: string; onlyIf?: string }>;
 }
 
 export interface EcosystemAdapter {

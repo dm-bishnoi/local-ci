@@ -18,6 +18,8 @@ const DEFAULT_PIPELINE = ['install', 'typecheck', 'test', 'coverage', 'lint', 'b
 interface OmittedStep {
   id: string;
   reason: string;
+  /** A note that is only shown while this other step is in the pipeline. */
+  onlyIf?: string;
 }
 
 function renderConfig(pipeline: readonly string[], omitted: readonly OmittedStep[]): string {
@@ -180,7 +182,10 @@ async function generate(
   adapter: EcosystemAdapter,
   detection: Detection,
 ): Promise<GeneratedProject> {
-  const { pipeline, omitted } = await withoutMissingTools(adapter, detection, adapter.defaultPipeline(detection));
+  const filtered = await withoutMissingTools(adapter, detection, adapter.defaultPipeline(detection));
+  const pipeline = filtered.pipeline;
+  // Explanatory notes about a step that did not make it into the pipeline are noise.
+  const omitted = filtered.omitted.filter((step) => step.onlyIf === undefined || pipeline.includes(step.onlyIf));
   if (pipeline.length === 0) {
     throw new InitError(
       `No runnable checks were found for "${path === '.' ? type : path}" (${type}). Nothing was written.\n` +

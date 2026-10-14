@@ -1,7 +1,9 @@
 import { chmod, mkdir, readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { initCommand } from '../../src/cli/commands/init.js';
 import { runCommand } from '../../src/cli/commands/run.js';
+import { loadConfig } from '../../src/config/loader.js';
 import { BATCH_UNSAFE_ARGUMENT } from '../../src/core/run-step.js';
 import { discoverProjects } from '../../src/ecosystems/discovery.js';
 import { javaAdapter, parseGradleIncludes, parseMavenModules, type JavaDetection } from '../../src/ecosystems/java/index.js';
@@ -120,7 +122,7 @@ describe('Java commands', () => {
     const d = await detect({ 'pom.xml': POM });
     const result = javaAdapter.defaultPipeline(d);
     expect(result.pipeline).toEqual(['compile', 'test', 'verify']);
-    expect(result.omitted).toEqual([{ id: 'build', reason: expect.stringMatching(/part of "verify"/) }]);
+    expect(result.omitted).toEqual([{ id: 'build', reason: expect.stringMatching(/part of "verify"/), onlyIf: 'verify' }]);
   });
 });
 
@@ -351,3 +353,45 @@ console.log('${name} ' + a.join(' ') + ' ok');
   }, 120_000);
 });
 
+describe('Java init messages', () => {
+  const JAVA_SHIM = "console.error('openjdk version \"17.0.12\" 2024-07-16'); process.exit(0);";
+  const MVN_SHIM = "if (process.argv[2] === '--version') console.log('Apache Maven 3.9.6');";
+  const files = { 'pom.xml': POM };
+
+  beforeEach(() => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it('when nothing can run, the error does not mention a "build is part of verify" note', async () => {
+    const dir = await makeTree(files);
+    const shims = await installShims({ java: JAVA_SHIM });
+    await withPath(
+      [shims],
+      async () => {
+        const error = await initCommand(dir).then(
+          () => '',
+          (e: unknown) => (e instanceof Error ? e.message : String(e)),
+        );
+        expect(error).toMatch(/No runnable checks were found/);
+        expect(error).toMatch(/mvn was not found on this machine/);
+        expect(error).not.toMatch(/Packaging is already part of "verify"/);
+      },
+      { replace: true },
+    );
+  }, 60_000);
+
+  it('when verify is generated, the config explains why build is left out', async () => {
+    const dir = await makeTree(files);
+    const shims = await installShims({ java: JAVA_SHIM, mvn: MVN_SHIM });
+    await withPath(
+      [shims],
+      async () => {
+        await initCommand(dir);
+        expect((await loadConfig(dir)).pipeline).toEqual(['compile', 'test', 'verify']);
+        expect(await readFile(join(dir, '.local-ci.yml'), 'utf8')).toMatch(/# - build {2}# Packaging is already part of "verify"/);
+      },
+      { replace: true },
+    );
+  }, 60_000);
+});

@@ -54,8 +54,10 @@ exercised against real tools and what has only been tested with fake ones.
 ### Fixed
 
 - `steps: { x: { run: [] } }` could crash validation instead of reporting an error.
-- A tool probe that timed out (8 s, on a heavily loaded machine) was reported as a missing tool and
-  blocked the step. It is now reported as "could not be checked" (a warning), and the step runs.
+- The Java `init` error no longer mentions the "build is part of verify" note when no step could be written.
+- A tool probe that timed out on a heavily loaded machine was reported as a missing tool and blocked
+  the step. It is now reported as "could not be checked" (a warning) and the step runs. The probe limit
+  is 20 s (it was 8 s); a tool that is not installed is still reported at once.
 
 ## 0.2.0
 

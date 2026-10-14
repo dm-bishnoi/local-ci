@@ -217,7 +217,7 @@ async function workspaceMembers(dir: string): Promise<WorkspaceMembers | null> {
 function defaultPipeline(detection: Detection): DefaultPipeline {
   const result: DefaultPipeline = pipelineFromCapabilities(detection, INIT_ORDER);
   if (detection.capabilities['build']?.state === 'available') {
-    result.omitted.push({ id: 'build', reason: 'Packaging is already part of "verify". Add "build" for a package-only step.' });
+    result.omitted.push({ id: 'build', reason: 'Packaging is already part of "verify". Add "build" for a package-only step.', onlyIf: 'verify' });
   }
   return result;
 }

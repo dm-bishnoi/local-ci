@@ -235,6 +235,14 @@ prints the exact command to choose each. It generates only checks that can run, 
 Go, Rust, .NET, Python, Java and PHP it also leaves out steps whose tool is not installed
 on this machine, with the reason as a comment.
 
+`--type` is your statement about the project. For a different ecosystem it is checked
+against what is on disk (`--type python` where there is no Python project is an error).
+Within the JavaScript family (`node`, `typescript`, `react`, `vue`, `angular`) it is only
+a label: they all run the same Node.js checks, and `init --type react` is accepted for a
+package that does not depend on React. `init` without `--type` picks the label from the
+dependencies it finds. A step that no tool can run is never written, so if nothing
+runnable is found `init` writes nothing and lists each reason.
+
 ### Custom commands (`run:`)
 
 When a check has no built-in form, give the exact command as an argument list:

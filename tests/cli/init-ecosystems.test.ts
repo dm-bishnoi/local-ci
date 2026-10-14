@@ -221,6 +221,17 @@ describe('explicit selection errors', () => {
     await expect(initCommand(dir, { type: 'cobol' })).rejects.toThrow(/Unknown project type "cobol".*node/);
   });
 
+  it('within the JavaScript family --type is only a label: same checks, no dependency required', async () => {
+    const files = { 'package.json': { name: 'x', scripts: { build: 'x', test: 'x' } } };
+    const plain = await makeTree(files);
+    const labelled = await makeTree(files);
+    await initCommand(plain);
+    await initCommand(labelled, { type: 'react' });
+    expect((await loadConfig(plain)).project.type).toBe('node');
+    expect((await loadConfig(labelled)).project.type).toBe('react');
+    expect(await pipelineOf(labelled)).toEqual(await pipelineOf(plain));
+  });
+
   it('rejects --type that is not what is on disk', async () => {
     const dir = await makeTree({ 'README.md': 'x' });
     await expect(initCommand(dir, { type: 'react' })).rejects.toThrow(/No react project was detected/);

@@ -16,7 +16,7 @@ import { resolveOnPath } from '../core/resolve-executable.js';
 
 const execFileAsync = promisify(execFile);
 
-export const PROBE_TIMEOUT_MS = 8_000;
+export const PROBE_TIMEOUT_MS = 20_000;
 /** Most `--version` flags print on the first line; cap it so output stays bounded. */
 const MAX_VERSION_CHARS = 64;
 
