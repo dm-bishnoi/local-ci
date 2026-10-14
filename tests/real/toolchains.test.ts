@@ -153,7 +153,8 @@ describeReal('python', hasPython, () => {
 
 // --- Go -------------------------------------------------------------------------
 
-const hasGo = (await toolWorks('go', ['version'])) && (await toolWorks('gofmt', ['-h']).catch(() => true));
+// gofmt ships in the same distribution and has no version flag (`gofmt -h` exits 2), so `go version` is the check.
+const hasGo = await toolWorks('go', ['version']);
 describeReal('go', hasGo, () => {
   const MAIN = 'package main\n\nfunc main() {}\n';
   const TEST = 'package main\n\nimport "testing"\n\nfunc TestOk(t *testing.T) {}\n';

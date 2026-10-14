@@ -3,11 +3,17 @@
  * which projects in the repository the configuration does not cover.
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { doctorCommand } from '../../src/cli/commands/doctor.js';
 import { runDoctorChecks } from '../../src/diagnostics/doctor.js';
 import { NO_BROWSERS } from '../helpers/fixtures.js';
 import { cleanupTrees, makeTree } from '../helpers/tree.js';
+
+// These tests scan real directories with every adapter and take well under a second
+// alone, but a loaded machine running the whole suite in parallel has been measured
+// at 5 s+ for them, which is the default limit. The limit is for headroom, not for
+// slow code: nothing here waits on a process.
+vi.setConfig({ testTimeout: 30_000 });
 
 afterEach(cleanupTrees);
 

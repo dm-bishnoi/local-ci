@@ -1,8 +1,14 @@
 import { mkdir, rmdir, symlink, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_SCAN_DEPTH, discoverProjects } from '../../src/ecosystems/discovery.js';
 import { cleanupTrees, makeTree } from '../helpers/tree.js';
+
+// These tests scan real directories with every adapter and take well under a second
+// alone, but a loaded machine running the whole suite in parallel has been measured
+// at 5 s+ for them, which is the default limit. The limit is for headroom, not for
+// slow code: nothing here waits on a process.
+vi.setConfig({ testTimeout: 30_000 });
 
 afterEach(cleanupTrees);
 

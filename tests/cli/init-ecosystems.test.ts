@@ -24,6 +24,12 @@ beforeEach(() => {
   logs.length = 0;
   vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => void logs.push(args.join(' ')));
 });
+// These tests scan real directories with every adapter and take well under a second
+// alone, but a loaded machine running the whole suite in parallel has been measured
+// at 5 s+ for them, which is the default limit. The limit is for headroom, not for
+// slow code: nothing here waits on a process.
+vi.setConfig({ testTimeout: 30_000 });
+
 afterEach(async () => {
   vi.restoreAllMocks();
   await cleanupTrees();

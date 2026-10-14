@@ -27,7 +27,7 @@ async function vendorBin(dir: string, name: string, js: string): Promise<void> {
   await mkdir(bin, { recursive: true });
   await writeFile(join(bin, `${name}.js`), js, 'utf8');
   const file = join(bin, binName(name));
-  await writeFile(file, windows ? `@echo off\r\nnode "%~dp0${name}.js" %*\r\n` : `#!/bin/sh\nexec node "$(dirname "$0")/${name}.js" "$@"\n`, 'utf8');
+  await writeFile(file, windows ? `@echo off\r\nnode "%~dp0${name}.js" %*\r\n` : `#!/bin/sh\nexec node "\${0%/*}/${name}.js" "$@"\n`, 'utf8');
   if (!windows) await chmod(file, 0o755);
 }
 

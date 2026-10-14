@@ -21,7 +21,8 @@ export async function installShims(shims: Record<string, string>): Promise<strin
       await writeFile(join(dir, `${name}.cmd`), `@echo off\r\nnode "%~dp0${name}.js" %*\r\n`, 'utf8');
     } else {
       const file = join(dir, name);
-      await writeFile(file, `#!/bin/sh\nexec node "$(dirname "$0")/${name}.js" "$@"\n`, 'utf8');
+      // `${0%/*}` instead of `$(dirname "$0")`: tests replace PATH, and dirname is an external command.
+      await writeFile(file, `#!/bin/sh\nexec node "\${0%/*}/${name}.js" "$@"\n`, 'utf8');
       await chmod(file, 0o755);
     }
   }

@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runCommand } from '../../src/cli/commands/run.js';
@@ -277,7 +277,7 @@ console.log('${name} ' + a.join(' ') + ' ok');
         'pom.xml': POM,
         '.mvn/wrapper/maven-wrapper.properties': '',
         'wrapper-impl.js': "console.log('wrapper ran: ' + process.argv.slice(2).join(' '))",
-        [windows ? 'mvnw.cmd' : 'mvnw']: windows ? '@echo off\r\nnode "%~dp0wrapper-impl.js" %*\r\n' : '#!/bin/sh\nexec node "$(dirname "$0")/wrapper-impl.js" "$@"\n',
+        [windows ? 'mvnw.cmd' : 'mvnw']: windows ? '@echo off\r\nnode "%~dp0wrapper-impl.js" %*\r\n' : '#!/bin/sh\nexec node "${0%/*}/wrapper-impl.js" "$@"\n',
       });
       await makeExecutable(cwd, windows ? 'mvnw.cmd' : 'mvnw');
       await withPath(
@@ -346,4 +346,3 @@ console.log('${name} ' + a.join(' ') + ' ok');
   }, 120_000);
 });
 
-void writeFile;

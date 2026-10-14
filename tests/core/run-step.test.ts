@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, rmdir, symlink, unlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rmdir, symlink, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { RunStepDefinition } from '../../src/config/schema.js';
@@ -361,5 +361,3 @@ describe.skipIf(!windows)('Windows batch files: real cmd.exe behaviour', () => {
   }, 60_000);
 });
 
-// Keeps the unused-import linter honest if a platform branch above is skipped.
-void writeFile;
