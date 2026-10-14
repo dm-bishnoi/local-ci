@@ -12,6 +12,11 @@ import { withTempProject } from '../helpers/reports.js';
 import { installShims, withPath } from '../helpers/shims.js';
 import { cleanupTrees, makeTree, writeTree } from '../helpers/tree.js';
 
+// Detection tests scan real directories and look tools up on PATH. They take well under
+// a second alone, but a loaded machine running the whole suite has been measured at 5 s+
+// for them (the default limit). This is headroom, not a sign of slow code.
+vi.setConfig({ testTimeout: 30_000 });
+
 afterEach(cleanupTrees);
 
 const PACKAGE = '[package]\nname = "x"\nversion = "0.1.0"\nedition = "2021"\n';

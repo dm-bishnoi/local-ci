@@ -90,7 +90,7 @@ function extractVersionStrict(output: string): string | undefined {
 export async function probeTool(
   name: string,
   versionArgs: readonly string[] = ['--version'],
-  options: { env?: NodeJS.ProcessEnv; requireZeroExit?: boolean } = {},
+  options: { env?: NodeJS.ProcessEnv; requireZeroExit?: boolean; timeoutMs?: number } = {},
 ): Promise<ProbeResult> {
   // A bare name is looked up on PATH first, by this program rather than by a
   // shell, so "not installed" is the same answer on every platform and in every
@@ -115,14 +115,14 @@ export async function probeTool(
     const env = options.env ? { ...process.env, ...options.env } : undefined;
     const { stdout, stderr } = useShell
       ? await execFileAsync([name, ...versionArgs].join(' '), {
-          timeout: PROBE_TIMEOUT_MS,
+          timeout: options.timeoutMs ?? PROBE_TIMEOUT_MS,
           windowsHide: true,
           maxBuffer: 64 * 1024,
           shell: true,
           ...(env ? { env } : {}),
         })
       : await execFileAsync(name, [...versionArgs], {
-          timeout: PROBE_TIMEOUT_MS,
+          timeout: options.timeoutMs ?? PROBE_TIMEOUT_MS,
           windowsHide: true,
           maxBuffer: 64 * 1024,
           ...(env ? { env } : {}),
@@ -135,6 +135,14 @@ export async function probeTool(
   } catch (error) {
     // The executable does not exist: a definite answer, not an unverified one.
     if (errorCode(error) === 'ENOENT') return { outcome: 'missing', detail: `${name} was not found on PATH.` };
+
+    // The probe was stopped for taking too long. That says nothing about whether the
+    // tool works (a loaded machine makes any process slow to start), so it is
+    // "could not be checked", never "missing" and never "present".
+    if ((error as { killed?: unknown }).killed === true) {
+      const seconds = Math.round((options.timeoutMs ?? PROBE_TIMEOUT_MS) / 1000);
+      return { outcome: 'blocked', detail: `${name} did not answer within ${seconds}s, so it could not be checked.` };
+    }
 
     if (isSpawnFailure(error)) {
       const code = errorCode(error);

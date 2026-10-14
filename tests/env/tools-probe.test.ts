@@ -60,6 +60,22 @@ describe('probeTool: missing, broken and present are different answers', () => {
     });
   });
 
+  it('a probe that is too slow is "could not be checked", never "missing" and never "present"', async () => {
+    const shims = await installShims({ slowtool: "setTimeout(() => { console.log('1.0.0'); }, 20000)" });
+    await withPath([shims], async () => {
+      const result = await probeTool('slowtool', ['--version'], { timeoutMs: 600 });
+      expect(result.outcome).toBe('blocked');
+      expect(result.detail).toMatch(/did not answer within 1s, so it could not be checked/);
+      expect(result.version).toBeUndefined();
+
+      // The same slow answer is accepted when the limit allows it.
+      const patient = await installShims({ slowtool: "setTimeout(() => { console.log('2.0.0'); }, 300)" });
+      await withPath([patient], async () => {
+        expect(await probeTool('slowtool', ['--version'], { timeoutMs: 15000 })).toMatchObject({ outcome: 'ok', version: '2.0.0' });
+      });
+    });
+  }, 60_000);
+
   it('passes constant environment to the probe', async () => {
     const shims = await installShims({ envtool: "console.log(process.env.PROBE_FLAG === 'on' ? '1.0.0' : 'wrong')" });
     await withPath([shims], async () => {
