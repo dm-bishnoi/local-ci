@@ -16,7 +16,7 @@ import { runCommand } from '../../src/cli/commands/run.js';
 import { NO_BROWSERS } from '../helpers/fixtures.js';
 import { withTempProject } from '../helpers/reports.js';
 import { writeTree } from '../helpers/tree.js';
-import { describeReal, lastReport, statuses, toolWorks, withHermeticNpm } from './helpers.js';
+import { describeReal, lastReport, probeToolState, statuses, toolWorks, withHermeticNpm } from './helpers.js';
 
 const execFileAsync = promisify(execFile);
 const windows = process.platform === 'win32';
@@ -260,10 +260,15 @@ it.skipIf(hasDotnet || !dotnetOnPath)('a dotnet that exists but cannot run is BL
 // --- Java ------------------------------------------------------------------------
 
 const hasJava = await toolWorks('java', ['-version']);
-const hasMvn = hasJava && (await toolWorks('mvn', ['--version']));
-const hasGradle = hasJava && (await toolWorks('gradle', ['--version']));
+const mvnState = hasJava ? await probeToolState('mvn', ['--version']) : 'failed';
+const gradleState = hasJava ? await probeToolState('gradle', ['--version']) : 'failed';
+const hasMvn = mvnState === 'works';
+const hasGradle = gradleState === 'works';
+// A probe that timed out says nothing about whether the tool is installed, so the "tool is absent" tests skip.
+const mvnMaybeInstalled = mvnState !== 'failed';
+const gradleMaybeInstalled = gradleState !== 'failed';
 describeReal('java (JDK)', hasJava, () => {
-  it.skipIf(hasMvn)('a Maven project without mvn or a wrapper is BLOCKED naming mvn, while the JDK probe passes', async () => {
+  it.skipIf(mvnMaybeInstalled)('a Maven project without mvn or a wrapper is BLOCKED naming mvn, while the JDK probe passes', async () => {
     await withTempProject(async (cwd) => {
       await writeTree(cwd, {
         '.local-ci.yml': 'version: 1\nproject:\n  type: maven\npipeline: [compile]\n',
@@ -276,7 +281,7 @@ describeReal('java (JDK)', hasJava, () => {
     });
   }, 120_000);
 
-  it.skipIf(hasGradle)('a Gradle project without gradle or a wrapper is BLOCKED naming gradle', async () => {
+  it.skipIf(gradleMaybeInstalled)('a Gradle project without gradle or a wrapper is BLOCKED naming gradle', async () => {
     await withTempProject(async (cwd) => {
       await writeTree(cwd, {
         '.local-ci.yml': 'version: 1\nproject:\n  type: gradle\npipeline: [compile]\n',

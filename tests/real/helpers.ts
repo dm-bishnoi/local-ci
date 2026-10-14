@@ -16,14 +16,24 @@ const execFileAsync = promisify(execFile);
  */
 export const REQUIRED = process.env['LOCAL_CI_REAL_TOOLCHAINS'] === 'required';
 
+export type ToolState = 'works' | 'failed' | 'timed-out';
+
+/**
+ * Runs `command args`. A probe that exceeds its limit is 'timed-out', which is not the same as the
+ * tool being absent: Gradle's first `--version` on a busy Windows runner can take longer than 20 s.
+ */
+export async function probeToolState(command: string, args: string[] = ['--version'], timeout = 20_000): Promise<ToolState> {
+  try {
+    await execFileAsync(command, args, { timeout, shell: process.platform === 'win32', windowsHide: true });
+    return 'works';
+  } catch (error) {
+    return (error as { killed?: boolean }).killed === true ? 'timed-out' : 'failed';
+  }
+}
+
 /** True when `command args` runs and exits 0. */
 export async function toolWorks(command: string, args: string[] = ['--version']): Promise<boolean> {
-  try {
-    await execFileAsync(command, args, { timeout: 20_000, shell: process.platform === 'win32', windowsHide: true });
-    return true;
-  } catch {
-    return false;
-  }
+  return (await probeToolState(command, args)) === 'works';
 }
 
 /**
