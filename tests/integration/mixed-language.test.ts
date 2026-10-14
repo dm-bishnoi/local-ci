@@ -7,13 +7,13 @@
  * orchestration, attribution, blocking and reporting, not those toolchains.
  */
 
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { reportCommand } from '../../src/cli/commands/report.js';
 import { runCommand } from '../../src/cli/commands/run.js';
 import { NO_BROWSERS } from '../helpers/fixtures.js';
-import { withTempProject } from '../helpers/reports.js';
+import { newestRunIds, withTempProject } from '../helpers/reports.js';
 import { installShims, withPath } from '../helpers/shims.js';
 import { cleanupTrees, writeTree } from '../helpers/tree.js';
 
@@ -75,7 +75,7 @@ interface Report {
 
 async function lastRun(cwd: string): Promise<{ report: Report; dir: string }> {
   const base = join(cwd, '.local-ci', 'reports');
-  const [runId] = (await readdir(base)).sort().reverse();
+  const [runId] = await newestRunIds(base);
   const dir = join(base, runId ?? '');
   return { report: JSON.parse(await readFile(join(dir, 'report.json'), 'utf8')) as Report, dir };
 }

@@ -5,7 +5,7 @@
  * identically under cmd.exe and sh.
  */
 
-import { access, readFile, readdir } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runCommand } from '../../src/cli/commands/run.js';
@@ -13,7 +13,7 @@ import { doctorCommand } from '../../src/cli/commands/doctor.js';
 import { runDoctorChecks } from '../../src/diagnostics/doctor.js';
 import { runPreflightChecks } from '../../src/diagnostics/preflight.js';
 import { NO_BROWSERS, writeProject } from '../helpers/fixtures.js';
-import { withTempProject } from '../helpers/reports.js';
+import { newestRunIds, withTempProject } from '../helpers/reports.js';
 
 interface ReportedStep {
   id: string;
@@ -72,7 +72,7 @@ async function project(
 
 async function lastReport(cwd: string): Promise<{ report: Report; dir: string }> {
   const base = join(cwd, '.local-ci', 'reports');
-  const [runId] = (await readdir(base)).sort().reverse();
+  const [runId] = await newestRunIds(base);
   const dir = join(base, runId ?? '');
   return { report: JSON.parse(await readFile(join(dir, 'report.json'), 'utf8')) as Report, dir };
 }

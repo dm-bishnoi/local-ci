@@ -3,13 +3,13 @@
  * keep loading and keep behaving the same way, whatever they put in `type`.
  */
 
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runCommand } from '../../src/cli/commands/run.js';
 import { validateCommand } from '../../src/cli/commands/validate.js';
 import { NO_BROWSERS } from '../helpers/fixtures.js';
-import { withTempProject } from '../helpers/reports.js';
+import { newestRunIds, withTempProject } from '../helpers/reports.js';
 import { writeTree } from '../helpers/tree.js';
 
 const options = { skipToolProbes: true, browsers: NO_BROWSERS };
@@ -21,7 +21,7 @@ interface Report {
 
 async function lastReport(cwd: string): Promise<Report> {
   const base = join(cwd, '.local-ci', 'reports');
-  const [runId] = (await readdir(base)).sort().reverse();
+  const [runId] = await newestRunIds(base);
   return JSON.parse(await readFile(join(base, runId ?? '', 'report.json'), 'utf8')) as Report;
 }
 

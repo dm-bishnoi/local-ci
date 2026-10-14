@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { PipelineRunResult, PipelineStatus } from '../../src/core/pipeline-runner.js';
@@ -94,4 +94,18 @@ export async function withTempProject<T>(body: (cwd: string) => Promise<T>): Pro
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
+}
+
+/**
+ * Run directories under `base`, newest first.
+ *
+ * Run ids are `YYYYMMDD-HHMMSS-<random>`, so two runs in the same second are ordered by their
+ * random suffix. A fast machine finishes a fake-tool run in well under a second, so sorting by
+ * name picks the older run about half the time. Directory modification time orders them by when
+ * they were actually written.
+ */
+export async function newestRunIds(base: string): Promise<string[]> {
+  const names = await readdir(base);
+  const stamped = await Promise.all(names.map(async (name) => ({ name, mtime: (await stat(join(base, name))).mtimeMs })));
+  return stamped.sort((a, b) => b.mtime - a.mtime || (a.name < b.name ? 1 : -1)).map((entry) => entry.name);
 }

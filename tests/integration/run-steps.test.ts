@@ -3,14 +3,14 @@
  * original single-project Angular path, success, failure, blocking and reports.
  */
 
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runCommand } from '../../src/cli/commands/run.js';
 import { runPreflightChecks } from '../../src/diagnostics/preflight.js';
 import { blockingDiagnostics } from '../../src/diagnostics/types.js';
 import { NO_BROWSERS } from '../helpers/fixtures.js';
-import { withTempProject } from '../helpers/reports.js';
+import { newestRunIds, withTempProject } from '../helpers/reports.js';
 import { writeTree } from '../helpers/tree.js';
 
 const options = { skipToolProbes: true, browsers: NO_BROWSERS };
@@ -22,7 +22,7 @@ interface Report {
 
 async function lastReport(cwd: string): Promise<Report> {
   const base = join(cwd, '.local-ci', 'reports');
-  const [runId] = (await readdir(base)).sort().reverse();
+  const [runId] = await newestRunIds(base);
   return JSON.parse(await readFile(join(base, runId ?? '', 'report.json'), 'utf8')) as Report;
 }
 

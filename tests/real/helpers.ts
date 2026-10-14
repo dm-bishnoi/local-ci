@@ -1,9 +1,10 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
+import { newestRunIds } from '../helpers/reports.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -52,7 +53,7 @@ export interface RealReport {
 
 export async function lastReport(cwd: string): Promise<RealReport> {
   const base = join(cwd, '.local-ci', 'reports');
-  const [runId] = (await readdir(base)).sort().reverse();
+  const [runId] = await newestRunIds(base);
   return JSON.parse(await readFile(join(base, runId ?? '', 'report.json'), 'utf8')) as RealReport;
 }
 

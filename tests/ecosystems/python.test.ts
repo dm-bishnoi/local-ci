@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -10,7 +10,7 @@ import { discoverProjects } from '../../src/ecosystems/discovery.js';
 import { pythonAdapter, type PythonDetection } from '../../src/ecosystems/python/index.js';
 import type { AvailableCapability, Capability } from '../../src/ecosystems/types.js';
 import { NO_BROWSERS } from '../helpers/fixtures.js';
-import { withTempProject } from '../helpers/reports.js';
+import { newestRunIds, withTempProject } from '../helpers/reports.js';
 import { installShims, withPath } from '../helpers/shims.js';
 import { cleanupTrees, makeTree, writeTree } from '../helpers/tree.js';
 
@@ -236,7 +236,7 @@ describe('Python through the pipeline with fake tools (mocked toolchain)', () =>
 
   const lastReport = async (cwd: string) => {
     const base = join(cwd, '.local-ci', 'reports');
-    const [runId] = (await readdir(base)).sort().reverse();
+    const [runId] = await newestRunIds(base);
     return JSON.parse(await readFile(join(base, runId ?? '', 'report.json'), 'utf8')) as {
       steps: Array<{ id: string; status: string; exitCode?: number; stdout: string; error?: string }>;
     };
@@ -326,7 +326,7 @@ describe.skipIf(!realPython)('with the real Python on this machine (real toolcha
       });
       expect(await runCommand(cwd, { browsers: NO_BROWSERS })).toBe(1);
       const base = join(cwd, '.local-ci', 'reports');
-      const [runId] = (await readdir(base)).sort().reverse();
+      const [runId] = await newestRunIds(base);
       const report = JSON.parse(await readFile(join(base, runId ?? '', 'report.json'), 'utf8')) as { steps: Array<{ status: string; error?: string }> };
       expect(report.steps[0]!.status).toBe('BLOCKED');
       expect(report.steps[0]!.error).toMatch(/needs pytest/);

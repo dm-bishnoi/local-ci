@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, readdir } from 'node:fs/promises';
+import { chmod, mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { initCommand } from '../../src/cli/commands/init.js';
@@ -9,7 +9,7 @@ import { discoverProjects } from '../../src/ecosystems/discovery.js';
 import { javaAdapter, parseGradleIncludes, parseMavenModules, type JavaDetection } from '../../src/ecosystems/java/index.js';
 import type { AvailableCapability, Capability } from '../../src/ecosystems/types.js';
 import { NO_BROWSERS } from '../helpers/fixtures.js';
-import { withTempProject } from '../helpers/reports.js';
+import { newestRunIds, withTempProject } from '../helpers/reports.js';
 import { installShims, withPath } from '../helpers/shims.js';
 import { cleanupTrees, makeTree, writeTree } from '../helpers/tree.js';
 
@@ -254,7 +254,7 @@ console.log('${name} ' + a.join(' ') + ' ok');
 
   const lastReport = async (cwd: string) => {
     const base = join(cwd, '.local-ci', 'reports');
-    const [runId] = (await readdir(base)).sort().reverse();
+    const [runId] = await newestRunIds(base);
     return JSON.parse(await readFile(join(base, runId ?? '', 'report.json'), 'utf8')) as {
       steps: Array<{ id: string; status: string; exitCode?: number; stdout: string; error?: string }>;
     };

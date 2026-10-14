@@ -1,4 +1,4 @@
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runCommand } from '../../src/cli/commands/run.js';
@@ -12,7 +12,7 @@ import type { AvailableCapability, Capability } from '../../src/ecosystems/types
 import { NO_BROWSERS } from '../helpers/fixtures.js';
 import { installShims, withPath } from '../helpers/shims.js';
 import { cleanupTrees, makeTree } from '../helpers/tree.js';
-import { withTempProject } from '../helpers/reports.js';
+import { newestRunIds, withTempProject } from '../helpers/reports.js';
 import { writeTree } from '../helpers/tree.js';
 
 // Detection tests scan real directories and look tools up on PATH. They take well under
@@ -240,7 +240,7 @@ process.exit(0);
   const config = 'version: 1\nproject:\n  type: go\npipeline: [format, vet, test, build]\n';
   const lastReport = async (cwd: string) => {
     const base = join(cwd, '.local-ci', 'reports');
-    const [runId] = (await readdir(base)).sort().reverse();
+    const [runId] = await newestRunIds(base);
     return JSON.parse(await readFile(join(base, runId ?? '', 'report.json'), 'utf8')) as {
       steps: Array<{ id: string; status: string; exitCode?: number; stdout: string; error?: string }>;
     };
