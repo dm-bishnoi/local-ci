@@ -1,79 +1,257 @@
 # Local CI Runner
 
-Run CI-style checks locally before pushing, for JavaScript/TypeScript (Node.js, Angular, React, Vue), .NET, Python, Java, PHP, Go and Rust, with preflight diagnostics and console, JSON, and HTML reports.
+**Run your CI checks locally before you push.**
 
-> `npx @dm-bishnoi/local-ci-runner run`
+[![npm version](https://img.shields.io/npm/v/@dm-bishnoi/local-ci-runner)](https://www.npmjs.com/package/@dm-bishnoi/local-ci-runner)
+[![license](https://img.shields.io/npm/l/@dm-bishnoi/local-ci-runner)](LICENSE)
+[![CI](https://github.com/dm-bishnoi/local-ci/actions/workflows/verify-linux-process-tree.yml/badge.svg?branch=main)](https://github.com/dm-bishnoi/local-ci/actions/workflows/verify-linux-process-tree.yml)
+[![node](https://img.shields.io/node/v/@dm-bishnoi/local-ci-runner)](package.json)
 
-Local CI Runner is an npm CLI with a framework-agnostic core and one adapter per ecosystem. See [Languages and ecosystems](#languages-and-ecosystems) for exactly which checks each one runs, what they need, and what has and has not been verified against the real tools. GitHub Actions and Azure DevOps YAML are not interpreted: `.local-ci.yml` is the configuration.
+Local CI Runner is a command-line tool that runs a project's checks (install, type check,
+lint, format, test, build and others) on your own machine, with your own toolchains,
+before you push. It works out which checks the project can actually run, runs them
+without a shell, and writes console, JSON and HTML reports. A check that could not run is
+reported as `BLOCKED` or `UNSUPPORTED`, never as a pass.
 
-## Languages and ecosystems
+```bash
+npx @dm-bishnoi/local-ci-runner init
+npx @dm-bishnoi/local-ci-runner run
+```
 
-Local CI Runner detects a project, works out which checks it can really run, and runs
-them with the project's own tools. It does not interpret CI YAML and it does not
-guess: a check that the project is not set up for is reported, never assumed.
+> [!IMPORTANT]
+> **Released vs. `main`.** The npm release **0.2.0** ships the Angular adapter,
+> `package.json` script steps (`steps.<id>.script`), `doctor`, `preflight` and the reports.
+> Everything else in this README is merged on `main` but **not yet released**:
+> multi-language support (.NET, Python, Java, PHP, Go, Rust, the generic Node.js family),
+> `projects:`, `project.path`, `steps.<id>.run`, `settings.offline`,
+> `init --dry-run/--type/--path/--all/--scan-depth/--ignore` and `run --project`.
+> These are marked *(unreleased)* below. To use them now, [install from source](#install-from-source).
 
-| Ecosystem | `project.type` values | Checks (step ids) |
+## Contents
+
+- [Why Local CI Runner?](#why-local-ci-runner)
+- [Quick start](#quick-start)
+- [Supported ecosystems](#supported-ecosystems)
+- [Configuration](#configuration)
+- [CLI reference](#cli-reference)
+- [Reports and diagnostics](#reports-and-diagnostics)
+- [Security and execution model](#security-and-execution-model)
+- [Requirements and troubleshooting](#requirements-and-troubleshooting)
+- [Development and contributing](#development-and-contributing)
+- [Roadmap and limitations](#roadmap-and-limitations)
+- [License](#license)
+
+## Why Local CI Runner?
+
+- **Catch failures before you push.** A failing build or test shows up on your machine,
+  not after a CI round trip.
+- **Runs on your machine.** It uses the tools you already have installed and never
+  installs or switches a toolchain for you. Build-tool wrappers such as `mvnw` may still
+  download their own pinned distribution.
+- **Tells you what it could not check.** Every step ends with exactly one status, such as
+  `PASS`, `FAIL`, `BLOCKED` (a known requirement is missing), `UNSUPPORTED` (there is
+  nothing to run) or `SKIPPED` (see [Step statuses](#step-statuses)). Only an all-`PASS`
+  run exits 0.
+- **Reports you can act on.** Each run writes a console summary, `report.json`,
+  `summary.json`, a self-contained `report.html` and one log file per step that ran. Each
+  failure or block comes with its reason.
+- **An honest scope.** Running locally does not reproduce a remote CI environment. Local
+  CI Runner does not provide service containers, CI secrets, matrix builds, caches,
+  hosted-runner images or your CI's network policy, and it does not read GitHub Actions
+  or Azure DevOps YAML. Use it to find problems early, not to replace CI.
+
+## Quick start
+
+### Install
+
+```bash
+npm install --save-dev @dm-bishnoi/local-ci-runner   # per project
+npx @dm-bishnoi/local-ci-runner --help               # or run without installing
+```
+
+The package is `@dm-bishnoi/local-ci-runner`, and the command it installs is
+`local-ci-runner`. It needs Node.js 20.5.0 or later.
+
+> [!NOTE]
+> **The npm package is 0.2.0.** It detects Angular projects only; any other project runs
+> just its `steps.<id>.script` entries, and in a non-Angular project `init` writes the
+> Angular default pipeline. Its `init` accepts only `--force`, and `run` takes no
+> options. Everything marked *(unreleased)* in this README, including
+> `init --dry-run/--type/--path/--all`, `run --project`, `projects:` and `run:`, needs a
+> [build from source](#install-from-source).
+
+#### Install from source
+
+To use the unreleased features on `main`, build a package from a clone and install it
+into your project:
+
+```bash
+git clone https://github.com/dm-bishnoi/local-ci.git
+cd local-ci
+npm ci
+npm pack                                   # builds dist/ and writes dm-bishnoi-local-ci-runner-<version>.tgz
+cd /path/to/your/project
+npm install --save-dev /path/to/local-ci/dm-bishnoi-local-ci-runner-<version>.tgz
+```
+
+You can also run the built CLI directly: `node /path/to/local-ci/dist/cli/index.js <command>`.
+
+### First run
+
+Run every command from the directory that holds (or will hold) `.local-ci.yml`. The
+configuration is read from the current directory only; it is not searched for in parent
+directories.
+
+```bash
+cd /path/to/your/project
+local-ci-runner init        # detect the project and write .local-ci.yml
+local-ci-runner validate    # check the file against the schema
+local-ci-runner doctor      # what can run here, what cannot, and why
+local-ci-runner run         # preflight, then run the pipeline
+local-ci-runner report      # list stored runs; add a run id to show one
+```
+
+If you installed the package into the project (`npm install --save-dev`), prefix each
+command with `npx`. For a Node.js project with `test`, `lint` and `build` scripts and a
+`package-lock.json`, `init` *(unreleased: generic Node.js detection)* writes:
+
+```yaml
+version: 1
+
+project:
+  type: "node"
+
+pipeline:
+  - install
+  - test
+  - lint
+  - build
+  # Not added (see the reason after each step). Fix the cause, then add it.
+  # - typecheck  # No "typecheck" script in package.json, and no inferable type checker (needs "typescript" or "vue-tsc" declared and a tsconfig.json).
+  # - coverage  # Coverage cannot be determined safely: no "coverage" script, and no known coverage provider (karma-coverage, nyc, jest, c8 or @vitest/coverage-*) was found in dependencies.
+  # - format  # No "format:check" script in package.json, and no Prettier with a configuration was found.
+  # - security  # An audit contacts the package registry. Add "security" if you want it.
+
+settings:
+  failFast: false
+  timeoutMs: 300000
+```
+
+`run` then prints one line per step and the overall result:
+
+```text
+✓ Dependencies      PASS      2.8s  exit 0
+✓ Unit Tests        PASS      2.6s  exit 0
+✓ Lint              PASS      3.4s  exit 0
+✓ Production Build  PASS      2.7s  exit 0
+
+Result:          PASS
+Run ID:          20261015-120540-a16ce8a4
+```
+
+`init` only lists steps the project can run now. Every other default step is left as a
+comment with the reason. `init` also creates `.local-ci/.gitignore` (containing `*`), so
+stored reports stay out of version control. It never edits your own `.gitignore` and
+never overwrites an existing `.local-ci.yml` unless you pass `--force`.
+
+## Supported ecosystems
+
+*(Unreleased, except Angular and `package.json` script steps, which are in 0.2.0.)*
+
+| Ecosystem | `project.type` | Implemented checks (step ids) |
 |---|---|---|
-| JavaScript / Node.js, TypeScript, React, Vue, Angular | `node`, `javascript`, `typescript`, `react`, `vue`, `angular` | `install`, `typecheck`, `test`, `coverage`, `lint`, `format`, `build`, `security` |
+| Node.js: JavaScript, TypeScript, React, Vue, Angular | `node`, `javascript`, `typescript`, `react`, `vue`, `angular` | `install`, `typecheck`, `test`, `coverage`, `lint`, `format`, `build`, `security` |
 | .NET / C# | `dotnet`, `csharp` | `restore`, `build`, `test`, `format` |
 | Python | `python` | `install` (explicit only), `test`, `lint`, `format`, `typecheck` |
-| Java | `maven`, `gradle`, `java` | `compile`, `test`, `verify`, `build` |
-| PHP | `php`, `composer` | `install`, `test`, `analyse`, `format` |
+| Java (Maven, Gradle) | `maven`, `gradle`, `java` | `compile`, `test`, `verify`, `build` |
+| PHP (Composer) | `php`, `composer` | `install`, `test`, `analyse`, `format` |
 | Go | `go` | `format`, `vet`, `test`, `build` |
-| Rust | `rust`, `cargo` | `check`, `test`, `build`, `format`, `lint` |
+| Rust (Cargo) | `rust`, `cargo` | `check`, `test`, `build`, `format`, `lint` |
 
-`type` is matched case-insensitively. JavaScript, TypeScript, React, Vue and Angular are
-**one** ecosystem (Node.js) with different profiles: detecting a framework never removes
-a check, and no framework is assumed to have a particular test runner or script.
+`project.type` is case-insensitive. JavaScript, TypeScript, React, Vue and Angular all
+run the same Node.js checks; the type is a label, and no framework is assumed to use a
+particular test runner. A type that is not in the table runs only your `steps:` entries,
+and `validate`/`doctor` warn about it.
+
+A check is available only when the project shows evidence for it (a script, a
+configuration file or a declared dependency). Otherwise it is `UNSUPPORTED`. Its tool
+must also be installed when you run, otherwise the step is `BLOCKED`.
+
+### Verification status
+
+What has been exercised against real tools, and what has only been tested against fake
+tools and fixtures. The real-tool evidence is the `Real toolchains` job in
+[`verify-linux-process-tree.yml`](.github/workflows/verify-linux-process-tree.yml), which
+passed on `ubuntu-latest` and `windows-latest` for the merge of multi-language support
+(17 passed, 3 skipped). That job runs `tests/real` and fails, rather than skips, when a
+tool is missing. The 3 skipped tests cover tools that are *absent or broken* (a `dotnet`
+that cannot run, and a Maven or Gradle project with no `mvn`/`gradle`). Those cases cannot
+occur on a runner where the tools are installed.
+
+| Ecosystem | Real tool in CI (Ubuntu and Windows) | Tested only with fake tools / fixtures |
+|---|---|---|
+| Node.js | `npm ci` from a lockfile and `npm run` scripts; script runs through pnpm, Yarn and Bun | inferred `tsc`/`vue-tsc`/`eslint`/`prettier`/`vitest`/`jest`, `coverage`, `security` (`npm audit`/`pnpm audit`), real Angular/React/Vue builds |
+| .NET (SDK 8) | `restore` and `build` of a console project | `test`, `format`, solution ambiguity |
+| Python (3.12) | virtual-environment selection; a missing tool is `BLOCKED`; pytest pass and fail; `ruff format --check` | `lint` (`ruff check`), `typecheck` (mypy), `install` (pip, uv, poetry) |
+| Java (JDK 17) | a Maven project is recognised by preflight; **no Maven build was run** | every Maven goal, all of Gradle, wrappers |
+| PHP (8.3) | `composer install` from a lockfile, then a composer `test` script | PHPUnit fallback, PHPStan, php-cs-fixer, phpcs |
+| Go (1.22) | `format`, `vet`, `test`, `build`; unformatted code is a `FAIL` and is not rewritten | `go.work` workspaces |
+| Rust (stable) | `check`, `test`, `build` with `--offline --locked`; `cargo fmt --check` | `lint` (clippy), workspaces |
+
+**Known gaps:** no real toolchain has been run on **macOS**; there, only the unit and
+integration suite runs (on Node 20, 22 and 24). Gradle, mypy, clippy,
+`dotnet test`, `dotnet format`, the PHP analysers and real front-end framework builds
+have not been run against the real tools. Treat them as implemented and tested against
+fakes, not as production-verified.
 
 ### What each check runs
 
-Every command is an executable plus an argument list. No shell is involved.
+Each command is an executable plus an argument list; no shell is involved. Expand an
+ecosystem for details.
 
-**Node.js family** (package manager from the lockfile: npm, pnpm, Yarn classic/Berry, Bun)
+<details>
+<summary><strong>Node.js</strong> (npm, pnpm, Yarn classic/Berry, Bun, chosen from the lockfile)</summary>
 
 | Step | Command | Needs |
 |---|---|---|
-| `install` | `npm ci` / `pnpm install --frozen-lockfile` / `yarn install --frozen-lockfile` (Berry: `--immutable`) / `bun install --frozen-lockfile` | a lockfile (otherwise BLOCKED: it would create one) |
-| `typecheck`, `test`, `lint`, `build` | `<manager> run <script>` | the script in `package.json`. An explicit script **always** wins. |
-| `coverage` | `<manager> run coverage`, else `<manager> run test --coverage` (npm needs `--` before the flag, and gets it) | a `coverage` script, or a `test` script plus a known coverage provider (`nyc`, `c8`, `jest`, `karma-coverage`, `@vitest/coverage-*`) |
-| `format` | `<manager> run format:check` | a `format:check` script. A plain `format` script is never run: it may rewrite files. |
-| `security` | `npm audit --json` / `pnpm audit --json` | npm or pnpm (Yarn and Bun: UNSUPPORTED). Contacts the registry. |
+| `install` | `npm ci` / `pnpm install --frozen-lockfile` / `yarn install --frozen-lockfile` (Berry: `--immutable`) / `bun install --frozen-lockfile` | a lockfile; without one the step is `BLOCKED` because it would create one |
+| `typecheck`, `test`, `lint`, `build` | `<manager> run <script>` | the script in `package.json`. An explicit script always wins. |
+| `coverage` | `<manager> run coverage`, else `<manager> run test --coverage` | a `coverage` script, or a `test` script plus `nyc`, `c8`, `jest`, `karma-coverage` or `@vitest/coverage-*` |
+| `format` | `<manager> run format:check` | a `format:check` script. A plain `format` script is never run, because it may rewrite files. |
+| `security` | `npm audit --json` / `pnpm audit --json` | npm or pnpm (`UNSUPPORTED` for Yarn and Bun). Contacts the registry. |
 
-Without a script, a tool is **inferred** only when it is declared in `package.json`
-*and* its configuration exists, and the report says so:
+Without a script, a tool is inferred only when it is declared in `package.json` **and**
+its configuration exists: `tsc --noEmit -p tsconfig.json`, `vue-tsc --noEmit`,
+`eslint .`, `prettier --check .`, `vitest run` or `jest --ci` (exactly one declared).
+Angular projects get only `ng build` as an inferred fallback. Inferred tools run through
+`npx --no-install`, `pnpm exec`, `yarn exec` or `bun x --no-install`, so nothing is
+fetched from a registry.
 
-| Step | Inferred command | Evidence required |
-|---|---|---|
-| `typecheck` | `tsc --noEmit -p tsconfig.json` | `typescript` declared + a non-solution `tsconfig.json` |
-| `typecheck` (Vue) | `vue-tsc --noEmit` | `vue-tsc` declared + `tsconfig.json` |
-| `lint` | `eslint .` | `eslint` declared + an ESLint config |
-| `format` | `prettier --check .` | `prettier` declared + a Prettier config |
-| `test` | `vitest run` or `jest --ci` | exactly one of them declared + its config |
-| `build` | `ng build` | Angular only: `angular.json` + `@angular/cli` |
+In a monorepo package with no lockfile of its own, the workspace root's lockfile is used.
+A root counts only if it declares workspaces (`pnpm-workspace.yaml` or `workspaces` in
+`package.json`), and the search never leaves the enclosing git repository. The
+package manager is never installed, switched or replaced.
+</details>
 
-Inferred tools run through `npx --no-install` / `pnpm exec` / `yarn exec` / `bun x
---no-install`, so nothing is fetched from a registry. **Angular projects get no
-inferred fallbacks** beyond `ng build`; their commands are unchanged from earlier
-versions.
-
-**.NET** (`.sln`, `.slnx`, or one SDK-style `.csproj`/`.fsproj`/`.vbproj`)
+<details>
+<summary><strong>.NET</strong> (<code>.sln</code>, <code>.slnx</code>, or one SDK-style project)</summary>
 
 | Step | Command |
 |---|---|
-| `restore` | `dotnet restore ./<target>` (`--locked-mode` when a `packages.lock.json` exists) |
+| `restore` | `dotnet restore ./<target>` (`--locked-mode` when `packages.lock.json` exists) |
 | `build` | `dotnet build ./<target> --no-restore -c Release` |
-| `test` | `dotnet test ./<target> --no-restore -c Release` — only when a project references `Microsoft.NET.Test.Sdk` or sets `IsTestProject` |
-| `format` | `dotnet format ./<target> --verify-no-changes --no-restore` (SDK 6 or newer; `init` adds it only if an `.editorconfig` exists) |
+| `test` | `dotnet test ./<target> --no-restore -c Release`, only when a project references `Microsoft.NET.Test.Sdk` or sets `IsTestProject` |
+| `format` | `dotnet format ./<target> --verify-no-changes --no-restore` (SDK 6+; `init` adds it only if `.editorconfig` exists) |
 
-Several solutions, or several projects and no solution, in one directory are BLOCKED
-as ambiguous: point `project.path` at one. A `global.json` SDK version is required as a
-minimum. Telemetry and the first-run banner are switched off.
+Several solutions, or several projects without a solution, in one directory are
+`BLOCKED` as ambiguous. Point `project.path` at one. A `global.json` SDK version is
+enforced as a minimum. Telemetry and the first-run banner are turned off.
+</details>
 
-**Python** — each tool needs evidence (its configuration, or a declared dependency;
-comments do not count) **and** must import in the chosen interpreter
+<details>
+<summary><strong>Python</strong></summary>
 
-| Step | Command | Evidence |
+| Step | Command | Evidence required |
 |---|---|---|
 | `test` | `python -m pytest` | `pytest.ini`, `[tool.pytest.ini_options]`, `[tool:pytest]`, `conftest.py`, or a declared dependency |
 | `lint` | `python -m ruff check .` | `ruff.toml`, `[tool.ruff]`, or a declared dependency |
@@ -81,51 +259,59 @@ comments do not count) **and** must import in the chosen interpreter
 | `typecheck` | `python -m mypy [<package>]` | mypy configuration or dependency, plus a `files` setting or exactly one package |
 | `install` | `<venv python> -m pip install -r requirements.txt`, `uv sync --locked`, or `poetry install --no-interaction --sync` | an existing `.venv`/`venv` with `requirements.txt`, or `uv.lock`/`poetry.lock` with that tool |
 
-The interpreter is the project's `.venv` or `venv`, else `python3`/`python` (`py -3` on
-Windows). Dependencies are **never** installed unless the pipeline lists `install`,
-and `install` is never generated by `init` and never goes into a global interpreter.
-`requires-python = ">=X.Y"` is enforced as a minimum.
+Each tool must also import in the chosen interpreter: the project's `.venv` or `venv`,
+otherwise `python3`, then `python` (on Windows: `python`, then `py -3`). `install` is never generated by `init`
+and never targets a global interpreter. `requires-python = ">=X.Y"` is enforced as a
+minimum.
+</details>
 
-**Java** — Maven or Gradle, wrapper first (`mvnw`/`gradlew`, `.cmd`/`.bat` on Windows)
+<details>
+<summary><strong>Java</strong> (Maven or Gradle; wrapper first)</summary>
 
 | Step | Maven | Gradle |
 |---|---|---|
-| `compile` | `mvn -B compile` (plus a property that quiets download-progress logging) | `gradle --console=plain --no-daemon classes` |
+| `compile` | `mvn -B compile` | `gradle --console=plain --no-daemon classes` |
 | `test` | `mvn -B test` | `gradle … test` |
 | `verify` | `mvn -B verify` | `gradle … check` |
 | `build` | `mvn -B package -DskipTests` | `gradle … assemble` |
 
-A JDK (`java`) is always required; a declared `release`/`java.version` of 9 or higher
-becomes a minimum JDK. `pom.xml` together with `build.gradle` is BLOCKED as ambiguous.
-A wrapper that is not executable or lacks its properties file is BLOCKED with the fix.
-Wrappers download their pinned distribution on first use.
+`mvnw`/`gradlew` (`.cmd`/`.bat` on Windows) are preferred when present, and they download
+their pinned distribution on first use. A JDK is always required. A declared
+`release`/`java.version` of 9 or higher becomes a minimum. `pom.xml` together with
+`build.gradle` is `BLOCKED` as ambiguous, and so is a wrapper that is not executable or
+has no properties file.
+</details>
 
-**PHP** (Composer)
+<details>
+<summary><strong>PHP</strong> (Composer)</summary>
 
-| Step | Command | Evidence |
+| Step | Command | Evidence required |
 |---|---|---|
-| `install` | `composer install --no-interaction --no-progress` | `composer.lock` (otherwise UNSUPPORTED) |
-| `test` | `composer run-script test`, else `vendor/bin/phpunit --do-not-cache-result` | a `test` script, or `phpunit.xml(.dist)` + PHPUnit declared or installed |
-| `analyse` | `vendor/bin/phpstan analyse --no-progress` | `phpstan.neon(.dist)` + PHPStan declared or installed |
-| `format` | `vendor/bin/php-cs-fixer fix --dry-run --diff` or `vendor/bin/phpcs` | the tool's config + the tool declared or installed |
+| `install` | `composer install --no-interaction --no-progress` | `composer.lock` (otherwise `UNSUPPORTED`) |
+| `test` | `composer run-script test`, else `vendor/bin/phpunit --do-not-cache-result` | a `test` script, or `phpunit.xml(.dist)` plus PHPUnit |
+| `analyse` | `vendor/bin/phpstan analyse --no-progress` | `phpstan.neon(.dist)` plus PHPStan |
+| `format` | `vendor/bin/php-cs-fixer fix --dry-run --diff` or `vendor/bin/phpcs` | the tool's configuration plus the tool |
 
-`steps.<id>.script` in a PHP project means a composer script. `composer.json`
-`require.php` with a single lower bound is enforced as a minimum PHP.
+In a PHP project, `steps.<id>.script` names a Composer script. A `require.php` with a
+single lower bound is enforced as a minimum.
+</details>
 
-**Go** (`go.mod`, or `go.work` with its `use` directories)
+<details>
+<summary><strong>Go</strong> (<code>go.mod</code>, or <code>go.work</code>)</summary>
 
 | Step | Command |
 |---|---|
 | `format` | `gofmt -l .` |
 | `vet` / `test` / `build` | `go vet ./...` / `go test ./...` / `go build ./...` |
 
-`gofmt -l` exits 0 even when files need formatting, so `format` is judged by its
-**output**: any listed file (outside `vendor/` and `testdata/`) is a FAIL, and the
-files are named. A non-zero exit is a FAIL whose message is gofmt's stderr. `gofmt -w`
-is never used. `GOTOOLCHAIN=local` is set so a missing Go version is reported, never
-downloaded, and the `go` line of `go.mod` is required as a minimum.
+`gofmt -l` exits 0 even when files need formatting, so `format` is judged by its output.
+Any file it lists (outside `vendor/` and `testdata/`) makes the step `FAIL`, and the
+files are named. `gofmt -w` is never used. `GOTOOLCHAIN=local` stops Go from downloading
+a toolchain, and the `go` line of `go.mod` is enforced as a minimum.
+</details>
 
-**Rust** (`Cargo.toml`, `Cargo.lock`, workspaces)
+<details>
+<summary><strong>Rust</strong> (Cargo)</summary>
 
 | Step | Command |
 |---|---|
@@ -135,486 +321,43 @@ downloaded, and the `go` line of `go.mod` is required as a minimum.
 | `format` | `cargo fmt --all -- --check` (needs rustfmt) |
 | `lint` | `cargo clippy --all-targets -- -D warnings` (needs clippy) |
 
-`--workspace` is added for a workspace, `--locked` whenever a `Cargo.lock` exists, and
-`--offline` with `settings.offline`. `RUSTUP_AUTO_INSTALL=0` keeps rustup from
-installing a toolchain. Without a `Cargo.lock`, cargo creates one and `doctor` says so.
+`--workspace` is added for a workspace, `--locked` when `Cargo.lock` exists, and
+`--offline` with `settings.offline`. `RUSTUP_AUTO_INSTALL=0` stops rustup from
+installing a toolchain.
+</details>
 
-### How a project is detected
+### Detection and dependency installation
 
-Detection is read-only and deterministic. A manifest proves the ecosystem; it does not
-prove the optional tools are in use or installed.
+Detection is read-only. A manifest such as `package.json`, a `.sln`/`.csproj`,
+`pom.xml`/`build.gradle`, `pyproject.toml` with `[project]`, `composer.json`, `go.mod` or
+`Cargo.toml` identifies a project. Weaker hints, such as a `tox.ini` alone, are reported
+as candidates and never selected on their own. `project.type` in `.local-ci.yml` always
+decides which adapter runs. If the project on disk is not what the type says, its steps
+are `BLOCKED`.
 
-- **Strong evidence** identifies a project (`package.json`, a `.sln`/`.csproj`,
-  `pom.xml`/`build.gradle`, `pyproject.toml` with `[project]`/`[tool.poetry]`/
-  `[build-system]`, `setup.py`, `requirements*.txt`, `composer.json`, `go.mod`/`go.work`,
-  `Cargo.toml` with `[package]`/`[workspace]`). **Weak evidence** (a `tox.ini`, a
-  `pytest.ini`, a `pyproject.toml` with only tool tables) is reported as a candidate by
-  `init` and `doctor` and never selected on its own.
-- **Several ecosystems in one directory** are separate projects. **Ambiguity inside one
-  ecosystem** (two solutions, Maven plus Gradle) blocks that project with the reason.
-- `project.type` in `.local-ci.yml` always decides which adapter runs; detection only
-  confirms it. A project that is not what its type says is BLOCKED with the reason.
-- A check needs configuration or a declared dependency (otherwise it is unavailable and
-  `UNSUPPORTED`) **and** its tool must be present when you run (otherwise `BLOCKED`).
+No install step rewrites a manifest or lockfile, and none is added unless it is safe:
 
-### Dependency installation
-
-No install step is ever added unless it is safe and necessary, and none rewrites a
-manifest or lockfile.
-
-| Ecosystem | `init` adds an install step when | It never |
+| Ecosystem | `init` adds an install step when | Never |
 |---|---|---|
-| Node.js | a lockfile exists and `node_modules` is not already populated | runs `npm install` without a lockfile (BLOCKED) |
+| Node.js | a lockfile exists and `node_modules` is not populated | installs without a lockfile (`BLOCKED`) |
 | .NET | always (`restore`) | |
-| PHP | `composer.lock` exists and `vendor/` is absent | installs without a lockfile |
+| PHP | `composer.lock` exists and `vendor/` does not | installs without a lockfile |
 | Python | never | installs into a global interpreter |
-| Java, Go, Rust | has no install step; the build tool resolves what it needs | `go mod tidy`, `cargo update` |
+| Java, Go, Rust | no install step; the build tool resolves what it needs | runs `go mod tidy` or `cargo update` |
 
-Checks that need installed dependencies are BLOCKED ("install dependencies first")
-unless an install step runs earlier in the same project's pipeline, in which case it is
-only a warning. `init` leaves such steps out and says why.
-
-### Monorepos and several languages
-
-A repository with several projects lists them under `projects`:
-
-```yaml
-version: 1
-projects:
-  - name: web
-    type: react
-    path: apps/web
-    pipeline: [install, typecheck, lint, test, build]
-  - name: api
-    type: dotnet
-    path: services/api
-    pipeline: [restore, build, test]
-  - name: ml
-    type: python
-    path: ml
-    pipeline: [test, lint]
-settings:
-  failFast: false
-```
-
-- Step ids are qualified in reports and logs: `web.build`, `api.test`. A step shows as
-  `web: Production Build`, and every report carries a per-project roll-up.
-- A single `project:` with a `path:` points at one project below the root. The original
-  `project:` + `pipeline:` form is unchanged and keeps bare step ids.
-- `project` and `projects` are mutually exclusive; project names are letters, digits,
-  `_` and `-`, and unique. Paths are relative to the configuration file, may not be
-  absolute or contain `..`, and must stay inside the repository after symlinks are
-  resolved.
-- `local-ci-runner run --project web --project api` runs only those projects; an unknown
-  name is an error.
-- One project being BLOCKED never stops another project from running. `failFast` is
-  pipeline-wide: after a failure, later steps that could have run are `SKIPPED`.
-
-`init` and `doctor` find projects with workspace metadata first and a bounded scan
-second. `package.json` `workspaces`, `pnpm-workspace.yaml`, `go.work`, Cargo
-`[workspace]`, solution files, Maven `<modules>` and Gradle `include` say which
-directories belong to a project that is already listed; those are reported as
-*covered*, not listed again. The scan looks three levels deep by default and skips
-`node_modules`, `.git`, `bin`, `obj`, `target`, `vendor`, `dist`, `build`, `.venv` and
-similar. **Nothing is dropped silently:** covered members, weak candidates, directories
-the depth limit did not reach, symbolic links (never followed), and workspace patterns
-this version cannot expand (only literal paths, `*` and a trailing `**` are supported)
-are all reported.
-
-```bash
-local-ci-runner init                          # one project: writes a minimal configuration
-local-ci-runner init --dry-run                # print it, write nothing
-local-ci-runner init --all                    # every detected project, as `projects:`
-local-ci-runner init --path apps/web --type react
-local-ci-runner init --scan-depth 5 --ignore legacy
-```
-
-`init` never overwrites an existing `.local-ci.yml` without `--force`; `--dry-run` is the
-safe way to see what it would write. With more than one project it refuses to guess and
-prints the exact command to choose each. It generates only checks that can run, and for
-Go, Rust, .NET, Python, Java and PHP it also leaves out steps whose tool is not installed
-on this machine, with the reason as a comment.
-
-`--type` is your statement about the project. For a different ecosystem it is checked
-against what is on disk (`--type python` where there is no Python project is an error).
-Within the JavaScript family (`node`, `typescript`, `react`, `vue`, `angular`) it is only
-a label: they all run the same Node.js checks, and `init --type react` is accepted for a
-package that does not depend on React. `init` without `--type` picks the label from the
-dependencies it finds. A step that no tool can run is never written, so if nothing
-runnable is found `init` writes nothing and lists each reason.
-
-### Custom commands (`run:`)
-
-When a check has no built-in form, give the exact command as an argument list:
-
-```yaml
-steps:
-  contract-test:
-    run: [node, scripts/contract-test.js, --strict]
-    cwd: tools            # optional, relative to the project directory
-    timeoutMs: 600000     # optional
-```
-
-- It is an argument list, never a shell string: nothing is split, quoted, expanded or
-  globbed, so `$(...)`, `&&`, `*` and `%PATH%` reach the program as plain text.
-- `run[0]` is either a bare program name (looked up on `PATH`, **absolute `PATH` entries
-  only** — the current directory is never searched) or a path inside the project. A
-  project path may not be absolute or contain `..`, and must still be inside the project
-  after symlinks are resolved. `cwd` follows the same rules.
-- There is no way to set environment variables from the file.
-- A program that cannot be found, or a file that is not executable, is `BLOCKED` before
-  anything runs. PowerShell scripts (`.ps1`) and, on Windows, `.sh` files cannot be
-  started directly; run them through their interpreter (`[pwsh, -File, x.ps1]`,
-  `[bash, x.sh]`).
-- **Windows batch files (`.cmd`, `.bat`)** are started through `cmd.exe`, which
-  re-parses arguments. Any argument containing `% ! ^ & | < > " ( )` or a line break is
-  therefore rejected (the step is `BLOCKED`) rather than escaped. Call the underlying
-  `.exe` or a `node` script instead. This applies to `npm`, `pnpm` and `yarn` too when
-  you call them through `run:`.
-- Timeouts, cancellation, process-tree cleanup, output capture and secret masking are
-  the engine's, exactly as for every other step.
-
-### Statuses
-
-| Status | Meaning |
-|---|---|
-| `PASS` | The check ran and succeeded. |
-| `FAIL` | The check ran and failed (non-zero exit, or its output judged it a failure, as `gofmt -l` does). |
-| `TIMEOUT` | The check ran and exceeded its time limit (reported as `FAIL` with `timedOut: true`, classified separately). |
-| `BLOCKED` | A requirement that is known to be missing prevented it from running: a tool, a JDK, installed dependencies, a lockfile, a required environment variable, a project that is not what its type says. Nothing ran. |
-| `UNSUPPORTED` | local-ci-runner has no way to run this for this project: no such script, no configuration for the tool, an unknown step id. Nothing ran. |
-| `SKIPPED` | Intentionally not run (`failFast`, or cancellation before it started). |
-| `CANCELLED`, `ERROR` | Interrupted by the user; or an internal fault. |
-
-Only `PASS` is success and only an all-`PASS` run exits 0. `BLOCKED`, `UNSUPPORTED`,
-`SKIPPED`, `TIMEOUT`, `CANCELLED` and `ERROR` all exit non-zero, a pipeline made only of
-unsupported steps fails, and none is ever reported as `PASS`. A diagnostic that says a
-check *could not be performed* (`UNKNOWN`, for example when a sandbox forbids probing a
-tool) never blocks and never counts as a pass: the step runs and its own result decides.
-
-### Requirements and versions
-
-- Node.js 20.5.0 or later runs the CLI.
-- Every check needs its own tool on `PATH` (or the project's wrapper/virtual
-  environment): `dotnet`, `python`, `java` plus `mvn`/`gradle` or a wrapper, `php` and
-  `composer`, `go` and `gofmt`, `cargo` (with `rustfmt` and `clippy` for those steps).
-- Minimums are enforced only where the project declares them: `go.mod`, `global.json`,
-  `requires-python`, `composer.json` `require.php`, a Maven `release` of 9 or higher,
-  `engines.node`. `dotnet format` needs SDK 6 or newer.
-
-### Troubleshooting with `doctor`
-
-`local-ci-runner doctor` lists, for each project, what it can run and from what
-evidence, what it cannot and why, which tools are installed, and any project the
-configuration does not cover. `preflight` is the same gate `run` applies.
-
-| You see | Meaning and fix |
-|---|---|
-| `needs X, but X was not found on PATH` (`BLOCKED`) | Install it. Only that project's steps that need it are blocked. |
-| `… was found, but "X --version" did not report a version` | The tool is installed but broken (for example a `dotnet` that cannot load). Repair it. |
-| `needs pytest (python -m pytest), but it is not available` | Install pytest into the interpreter doctor names (the project's `.venv`, or the global one). |
-| `node_modules is missing … no earlier install step` | Install dependencies, or add `install` before the step. |
-| `requires java >= 21, but 17.0.12 is installed` | Switch JDK. Toolchains are never downloaded for you. |
-| `more than one solution` / `both Maven … and Gradle` | Point the project at one (`project.path`), or define the steps with `run:`. |
-| `mvnw is not executable` | `chmod +x mvnw`. |
-| `UNSUPPORTED` for a step | The project has no script or configuration for it. Add one, or remove the step. |
-| `Projects not in the configuration` | A project exists that `.local-ci.yml` never runs. Add it, or `init --all --dry-run`. |
-
-### Local versus CI
-
-This runs the checks on your machine, with your tools, before you push. It is not a CI
-replacement and does not promise CI parity. It does not provide service containers,
-secrets, matrix builds, caches, hosted-runner images or the network policy of your CI,
-and it does not read GitHub Actions or Azure DevOps YAML. `npm audit`/`pnpm audit`,
-Maven/Gradle wrappers and dependency restores use the network; `settings.offline` asks
-cargo (`--offline`), Gradle (`--offline`) and Maven (`-o`) not to, and is ignored by the
-other tools.
-
-### Platform notes
-
-- **Windows:** `.cmd`/`.bat` tools (`npm`, `pnpm`, `yarn`, `mvnw.cmd`, `gradlew.bat`,
-  `vendor\bin\*.bat`) are supported; see the batch-file rules under `run:`. A project path
-  containing `% ! ^ & | < > "` cannot use batch wrappers safely and is BLOCKED.
-  Symbolic links and junctions are never followed during discovery.
-- **macOS / Linux:** wrappers and `vendor/bin` tools must be executable.
-- **npm and `allow-scripts`:** `npm test`, `npx` and `npm run` export your whole npm
-  configuration to child processes as `npm_config_*` variables. With npm 11 and an
-  `allow-scripts` setting, a child `npm ci` then fails with `EALLOWSCRIPTS`. That is
-  npm's behaviour, and local-ci reports npm's message; unset the variable or run the
-  CLI directly.
-
-### Verification status
-
-What has actually been exercised, as opposed to what the code intends:
-
-| Ecosystem | Real tool exercised | Fake-tool / fixture tests |
-|---|---|---|
-| npm, pnpm, Bun | yes (Windows; scripts, `npm ci` from an empty lockfile) | yes |
-| Yarn | not on the machine this was built on | yes |
-| Python | yes: real interpreter and virtual environment, a missing `pytest` is `BLOCKED`. Real pytest/Ruff/mypy runs were not available. | yes |
-| Java | the JDK probe and a missing `mvn`/`gradle` are real; no Maven/Gradle build was run | yes |
-| .NET | a real but broken `dotnet` is `BLOCKED`; no working SDK was available | yes |
-| Go, Rust, PHP/Composer | not installed on the machine this was built on | yes |
-
-The `real-toolchains` job in `.github/workflows/verify-linux-process-tree.yml` installs
-all of them and runs `tests/real` with `LOCAL_CI_REAL_TOOLCHAINS=required`, where a
-missing tool is a failure instead of a skip. Until that job has passed, treat Go, Rust,
-PHP, .NET builds, Maven, Gradle and Yarn as implemented and unit/integration tested
-against fake tools, **not** as verified against the real tools. Linux and macOS paths
-are covered by the existing CI matrix and by tests that stub the platform; they were not
-run on the machine this was built on.
-
-### Migrating from 0.2.x
-
-- Existing single-project configurations work unchanged, and Angular produces the same
-  commands as before.
-- `project.type` still accepts any string. A type that is not in the table above behaves
-  exactly as it did: only `steps:` entries run, every other step is `UNSUPPORTED`, and
-  `validate`/`doctor` now print a warning saying so. Types that *are* in the table
-  (`node`, `react`, `python`, …) now get their built-in checks, so a step you did not
-  script, which used to be `UNSUPPORTED`, may now run (or be `BLOCKED`/`UNSUPPORTED` for
-  a concrete reason). `steps:` entries still take precedence over built-ins.
-- `init` refuses to write when several projects are found, instead of writing the Angular
-  default. Use `--all`, `--path`/`--type`, or `--dry-run`.
-- A tool that cannot be found now reads as missing (`BLOCKED`) on every platform; before,
-  on Linux and macOS some probes read as unverified.
-
-## Phase 4.5 status
-
-Phase 4.5 adds **preflight, doctor and environment readiness**. The loop is now:
-
-```
-detect → preflight → run → diagnose → report → re-run
-```
-
-The product principle behind it: **DETECT → SOLVE/GUIDE → VERIFY**. A condition that
-could not be verified is reported as unverified, never as a pass, and a blocked or
-unsupported condition is never converted into `PASS`.
-
-```
-local-ci-runner preflight
-      ↓
-blocking condition?
-      ├─ yes → report BLOCKED → do not execute the affected steps
-      └─ no  → execute the pipeline
-```
-
-New commands:
-
-- `local-ci-runner doctor` — diagnostic only. Audits the environment, the project and the
-  configuration. It never executes a pipeline step, never installs anything and never
-  modifies the project.
-- `local-ci-runner preflight` — "can this configured pipeline reasonably run here?" Runs the
-  same checks that gate `local-ci-runner run`, for a human.
-- `local-ci-runner run` — now runs preflight first. Blocking conditions prevent the affected
-  steps from executing and are reported as `BLOCKED`; warnings inform but never block.
-
-Each run's report now also carries an **environment fingerprint** (OS, architecture,
-Node, package manager, Git, Angular, browsers, CI/local marker) and the **preflight
-result** that gated it, so a saved report is self-describing.
-
-## Phase 4 status
-
-Phase 4 delivers the **reporting layer**. Every run — successful, failed, timed
-out, cancelled or unsupported — produces a complete, durable set of artifacts:
-
-```
-local-ci-runner run
-      ↓
-PipelineRunner          collected StepResults
-      ↓
-Report Model            one pass: derive, redact, bound
-      ↓
-  ├── Console          the report you read in the terminal
-  ├── JSON             report.json    complete, machine-readable
-  ├── Summary          summary.json   small, machine-readable
-  ├── HTML             report.html    self-contained dashboard
-  └── Logs             logs/<step>.log complete per-step output
-```
-
-The Report Model is the only place that derives a status, masks a secret or
-truncates output. Reporters render; they never re-derive, so two reporters
-cannot disagree, and no reporter can accidentally serialize more than the model
-allows.
-
-Implemented and verified:
-
-- `report.json`, `summary.json`, `report.html` and `logs/` for every run
-- Log files only for steps that actually executed — no fabricated evidence
-- `PASS` / `FAIL` / `UNSUPPORTED` / `SKIPPED` / `CANCELLED` preserved everywhere
-- Console report that reads correctly without colour, with ora only for live progress
-- Self-contained HTML dashboard with no frontend framework and no new dependency
-- Coverage read from a real Istanbul summary, or reported honestly as missing
-- Redaction of environment secrets, credential flags and URL-embedded passwords
-- Reporting failures isolated: a broken artifact never destroys the run result
-- `local-ci-runner report <run-id>`, with safe run-id handling and readable errors
-
-Azure DevOps, Docker, AI and other frameworks remain out of scope.
-
-## Angular support
-
-The core engine knows nothing about Angular. All Angular awareness lives in
-`src/adapters/angular/`:
-
-```
-local-ci-runner run
-      ↓
-detect project (angular.json, package.json, lockfile)
-      ↓
-Angular adapter resolves each logical step to a local command
-      ↓
-StepRegistry  ← core only ever sees PipelineStep objects
-      ↓
-PipelineRunner → StepRunner → ProcessRunner → local process
-      ↓
-Report Model → Console / JSON / Summary / HTML / Logs
-```
-
-A React, Vue or Node adapter would follow the same shape without touching the
-engine or the reporting layer.
-
-### Detection
-
-A project is Angular when `angular.json` exists, or when `package.json` declares
-`@angular/core`, `@angular/cli`, `@angular/build` or `@angular-devkit/build-angular`.
-A TypeScript project with neither is not treated as Angular. If
-`.local-ci.yml` says `project.type: angular` but Angular is not found, the run
-**fails with a diagnostic** instead of executing unrelated commands.
-
-A UTF-8 BOM in `package.json` is tolerated, because Windows editors add one and
-`npm` accepts it.
-
-### Package manager
-
-Resolved from the lockfile, in this fixed order:
-
-| Lockfile | Manager |
-|---|---|
-| `package-lock.json` | npm |
-| `pnpm-lock.yaml` | pnpm |
-| `yarn.lock` | yarn |
-
-For a package inside a monorepo with no lockfile of its own, the lockfile at the
-workspace root is used. An ancestor counts as a workspace root only if it declares
-one (`pnpm-workspace.yaml`, or `workspaces` in its `package.json`), and the search
-never goes past the enclosing git repository.
-
-With no lockfile anywhere, npm is used and the run reports that the choice was a
-default. In that case the `install` step is **BLOCKED**: installing without a
-lockfile would create one and could resolve different versions than CI, and a local
-check must not quietly change the project it is checking. Commit a lockfile, or
-remove `install` from the pipeline and install dependencies yourself.
-
-The adapter never installs or switches package managers, and never falls back
-to a different one: if the detected manager is unavailable the step fails.
-
-### Step mapping
-
-Every mapping is either a real command or an explicit `UNSUPPORTED`. Nothing is
-assumed to exist, and nothing is reported as passing without having run.
-
-| Step | Report name | Resolution |
-|---|---|---|
-| `install` | Dependencies | `npm ci` with a lockfile, otherwise `npm install`; `pnpm install --frozen-lockfile` and `yarn install --frozen-lockfile` with their lockfiles |
-| `typecheck` | TypeScript | `run typecheck` if the script exists, otherwise `UNSUPPORTED` |
-| `test` | Unit Tests | `run test` if the script exists, otherwise `UNSUPPORTED` |
-| `coverage` | Coverage | `run coverage`, else `run test` plus `--coverage` when a coverage provider is declared, otherwise `UNSUPPORTED` |
-| `lint` | Lint | `run lint` if the script exists, otherwise `UNSUPPORTED` |
-| `build` | Production Build | `run build` if the script exists, else the local `ng build` via `npx --no-install` / `pnpm exec` / `yarn exec` |
-| `security` | Security | `npm audit --json` or `pnpm audit --json`; `UNSUPPORTED` for yarn |
-
-Notes:
-
-- A project created by `ng new` ships `build` and `test` scripts but no
-  `typecheck`, `lint` or `coverage` script, so those steps report `UNSUPPORTED`
-  with a reason. Add the scripts to enable them.
-- The Angular CLI fallback uses `npx --no-install`, so it can never fetch a
-  package from a registry. It only applies when `angular.json` exists and
-  `@angular/cli` is declared.
-- Coverage is only forwarded when a real provider is declared. No coverage
-  percentage is ever invented.
-- `install` never modifies `package.json` or updates dependencies. `npm ci` is
-  strict about the lockfile being in sync with `package.json`, which is the
-  desired behaviour for CI.
-
-## Phase 2 status
-
-Phase 2 delivers the CI execution engine. The core flow is:
-
-```
-CLI
- ↓
-PipelineRunner          sequential execution, failFast, overall result
- ↓
-StepRunner               per-step lifecycle, timeout, cancellation
- ↓
-ProcessRunner            one child process: capture, timeout, termination
- ↓
-local process
-```
-
-Implemented and verified:
-
-- Structured process results (exit code, signal, stdout, stderr, duration, timeout and cancellation state)
-- Per-step timeouts with child termination
-- Cancellation via `AbortSignal`, surfaced as `CANCELLED`
-- `failFast` for pipelines
-- Per-step log files alongside JSON and HTML reports
-- Secret masking in captured output and in reported command lines
-- Step lifecycle and result model extended with `CANCELLED`
-- Vitest coverage for the process, step and pipeline layers
-
-## Quick start
-
-```bash
-npm install
-npm run build
-npm link
-
-cd /path/to/your/project
-local-ci-runner init
-local-ci-runner validate
-local-ci-runner doctor
-local-ci-runner preflight
-local-ci-runner run
-
-local-ci-runner report <run-id>   # reopen a stored run
-```
-
-`doctor` diagnoses the machine and the project. `preflight` answers the one question
-that decides whether `run` should start. `run` performs that same preflight itself
-before executing anything.
-
-The package can also be invoked after publishing with:
-
-```bash
-npx @dm-bishnoi/local-ci-runner init
-npx @dm-bishnoi/local-ci-runner run
-```
-
-In an Angular project, `init` lists only the default steps (`install`, `typecheck`,
-`test`, `coverage`, `lint`, `build`, `security`) that the project can actually run.
-A step it cannot run yet, for example `lint` without a `"lint"` script or `install`
-without a lockfile, is written as a comment in `pipeline` with the reason, and is
-named in the output. Fix the cause and uncomment the line to add it; an unsupported
-step that is listed is reported as `UNSUPPORTED`, never as passing. In any other
-supported project `init` does the same for that ecosystem (see [Monorepos and several
-languages](#monorepos-and-several-languages)); when nothing is detected it writes the
-default pipeline and says so.
-
-`init` also creates `.local-ci/.gitignore` (containing `*`), so stored reports stay
-out of version control. Your own `.gitignore` is never edited. `run` creates the same
-file if it is missing, and never overwrites one that exists.
-
-When working on this repository itself, run the CLI with `node dist/cli/index.js` or
-`npm run dev`. `npx --package=@dm-bishnoi/local-ci-runner@<this version>` from
-*inside* the repository finds the repository's own package.json, installs nothing,
-and reports `local-ci-runner` as not found. That is npm's behaviour, not a packaging
-fault; run it from any other directory.
+A check that needs installed dependencies is `BLOCKED` ("install dependencies first")
+unless an install step runs earlier in the same project's pipeline.
 
 ## Configuration
 
-Create `.local-ci.yml`:
+`.local-ci.yml` sits in the directory you run the CLI from. Every section is strict: an
+unknown or misspelled key (`timeoutms`, `failfast`) is an error that names the key, so a
+typo cannot silently change behaviour.
+
+### Minimal configuration
+
+This is [`templates/local-ci.yml`](templates/local-ci.yml), the Angular default that 0.2.0
+also uses:
 
 ```yaml
 version: 1
@@ -634,65 +377,45 @@ pipeline:
 settings:
   failFast: false
   timeoutMs: 300000
-
-environment:
-  variables:
-    required:
-      - DATABASE_URL
-      - API_URL
 ```
 
-### environment.variables.required
+### Options
 
-Names of environment variables the pipeline needs. Only presence is checked — local-ci
-never reads, prints or stores their values, and it never loads `.env` files for you.
-A missing required variable is `BLOCKED`: the run reports it and does not execute the
-affected steps.
+| Key | Meaning |
+|---|---|
+| `version` | Always `1`. |
+| `project.type` | Which adapter runs (see [Supported ecosystems](#supported-ecosystems)). Any string is accepted; an unknown type runs only `steps:` entries. |
+| `project.path` *(unreleased)* | Project directory relative to the configuration file. |
+| `pipeline` | Step ids, run in order. Required with `project`. |
+| `projects` *(unreleased)* | A list of projects, each with `name`, `type`, optional `path`, `pipeline` and optional `steps`. Cannot be combined with `project`, or with top-level `pipeline`/`steps`. |
+| `steps.<id>.script` | Run a `package.json` script (a Composer script in PHP projects) as step `<id>`. |
+| `steps.<id>.run` *(unreleased)* | Run a command given as an argument list. See [Custom commands](#custom-commands-run). |
+| `steps.<id>.cwd` *(unreleased)* | Working directory for a `run:` step, relative to the project. |
+| `steps.<id>.timeoutMs` | Per-step time limit that overrides `settings.timeoutMs`. |
+| `settings.failFast` | `false` (default): every step runs. `true`: after the first step that does not pass (`FAIL`, `UNSUPPORTED`, `BLOCKED`, …), later steps that could run are `SKIPPED`. |
+| `settings.timeoutMs` | Per-step limit in ms, at most 24 hours. **Default: 30 minutes.** A timed-out step's whole process tree is terminated and the step fails with `timedOut: true`. |
+| `settings.offline` *(unreleased)* | Asks cargo (`--offline`), Gradle (`--offline`) and Maven (`-o`) not to use the network. Other tools ignore it. |
+| `environment.variables.required` | Variable names that must be set. Only presence is checked; values are never read or stored, and `.env` files are never loaded. A missing variable is `BLOCKED`. |
 
-If `.env.example` exists, its variable *names* are used purely as guidance, so the
-recommendation can tell you to copy the example. Its values are discarded on read.
+Each key under `steps` must also appear in the pipeline, and a `steps` entry replaces
+the built-in check with the same id.
 
-### settings.failFast
+### Script steps
 
-- `false` (default) — every step runs; a failure does not stop later steps.
-- `true` — the pipeline stops after the first failure or unsupported step, and every
-  later step is reported as `SKIPPED`. Skipped steps are never reported as executed.
-
-### settings.timeoutMs
-
-Optional per-step time limit in milliseconds, at most 24 hours. **When omitted, `run`
-applies a default of 30 minutes (1800000 ms)**, so no step can hang indefinitely;
-`validate` prints the effective timeout and whether it is the default. When the
-limit is reached the whole process tree is terminated, the step fails with
-`timedOut: true`, and the error states the limit, e.g. `Step timed out after 300s`.
-
-A timed-out step keeps its evidence: the command line, and everything it printed
-before the timeout, are in `report.json`, `report.html` and its log. The next step
-starts only after the timed-out process tree has exited.
-
-A timeout fails the step. It is never reported as a pass, and it is never silently
-converted into a generic failure.
-
-### settings.offline
-
-Optional boolean. Asks tools that have an offline mode not to use the network: cargo
-(`--offline`), Gradle (`--offline`) and Maven (`-o`). Tools without one ignore it; it
-does not stop `npm ci`, `dotnet restore` or `composer install` from fetching packages
-if you list those steps.
-
-### steps
-
-Run a project script as a pipeline step. This is how a non-Angular project (any
-`project.type`) is checked, and how an Angular project adds a step the adapter does
-not know (such as `e2e`) or points a built-in step at a different script.
+Run any `package.json` script as a step. This works for every `project.type`, including
+types that have no built-in adapter:
 
 ```yaml
+version: 1
+
 project:
   type: node
+
 pipeline:
   - lint
   - test
   - e2e
+
 steps:
   lint:
     script: lint
@@ -700,541 +423,447 @@ steps:
     script: test
   e2e:
     script: "test:e2e"
-    timeoutMs: 600000      # optional; overrides settings.timeoutMs for this step
+    timeoutMs: 600000
+
+environment:
+  variables:
+    required:
+      - API_URL
 ```
 
-- Each key under `steps` must also be listed in `pipeline`.
-- `script` is the name of a script in `package.json`. It runs as `npm run <script>`
-  (`pnpm run` / `yarn run`, following your lockfile) with no shell string built by
-  local-ci-runner. Names may use letters, digits and `: . _ / -`, and must start with a
-  letter or digit.
-- A `script` step accepts only `script` and `timeoutMs`. For any other command use
-  `run:` (see [Custom commands](#custom-commands-run)). An unknown key is an error, as
-  everywhere else in the file.
-- A `steps` entry replaces the built-in implementation of the same id. Angular steps
-  you do not script behave exactly as before.
-- A script that is missing or empty in `package.json` reports `UNSUPPORTED` and exits
-  non-zero; nothing is launched. `doctor` and `preflight` flag it first.
-- Exit codes, timeouts, cancellation, process-tree cleanup, secret masking, logs and
-  the JSON/HTML reports are the same as for every other step, and `failFast` applies.
-- A `script` step can only choose among scripts that `package.json` already defines. A
-  `run:` step starts the program you name, so treat `.local-ci.yml` like any other file
-  that can execute code on your machine, and review changes to it.
+Because every step is scripted, this also works with 0.2.0. Install dependencies first:
+0.2.0 blocks these steps when `node_modules` is missing or empty and the pipeline has no
+`install` step. On `main`, `lint` and `test` would also work without `steps:` entries,
+through the built-in Node.js checks.
 
-### Unknown keys
+The script runs as `npm run <script>` (`pnpm run` / `yarn run`, following the lockfile).
+Its name is passed as one argument and must use only letters, digits and `: . _ / -`.
+A script that is missing from `package.json` makes the step `UNSUPPORTED`; nothing is
+launched.
 
-Every section of `.local-ci.yml` is strict: an unrecognised key is an error that names
-the key and where it is (for example `settings: Unrecognized key: "timeoutms"`). A
-misspelled setting therefore fails `validate` and `run` instead of being silently
-ignored.
+### Monorepos and multiple languages
 
-## Pipeline execution lifecycle
+*(Unreleased.)* List each project with its own directory and pipeline. Paths are relative to the
+configuration file. They may not be absolute or contain `..`, and must stay inside the
+repository after symbolic links are resolved.
 
-Each step moves through the lifecycle and ends in exactly one terminal status. See
-[Step statuses](#step-statuses) for what each one means and whether it gets a log
-file.
+```yaml
+version: 1
 
-An `UNSUPPORTED` step always makes the pipeline non-successful. Missing functionality is
-never reported as a pass.
+projects:
+  - name: web
+    type: node
+    path: apps/web
+    pipeline: [install, test, build, contract-test]
+    steps:
+      contract-test:
+        run: [node, scripts/contract-test.js, --strict]
+  - name: ml
+    type: python
+    path: ml
+    pipeline: [test]
+  - name: gateway
+    type: go
+    path: services/gateway
+    pipeline: [format, vet, test, build]
 
-## Cancellation
-
-Pressing Ctrl+C (SIGINT) during `local-ci-runner run`:
-
-1. aborts the pipeline through an `AbortController`,
-2. terminates the running child process **and its process tree** (see
-   [Process-tree cleanup](#process-tree cleanup)),
-3. marks the active step `CANCELLED`,
-4. marks every remaining step `SKIPPED`,
-5. still writes reports and logs,
-6. exits with a non-zero status.
-
-Cancellation is distinct from failure and is reported as `CANCELLED`. Signal handlers
-are installed once per command and always removed afterwards, so repeated runs do not
-accumulate listeners.
-
-## Exit codes
-
-- `0` — success. For `run`, the pipeline succeeded: every step is `PASS`. For
-  `doctor` and `preflight`, the verdict is `PASS` or `WARNING` — warnings inform and
-  never fail a command.
-- non-zero — the run did not succeed (`FAIL`, `BLOCKED`, `UNSUPPORTED`, `CANCELLED`,
-  `TIMEOUT`, `ERROR`), or `doctor`/`preflight` found a `BLOCKED` or `ERROR` verdict.
-
-There is no "partial success" state. `BLOCKED`, `UNSUPPORTED`, `SKIPPED`, `TIMEOUT`,
-`CANCELLED` and `ERROR` are all non-zero, and none of them is ever reported as `PASS`.
-
-`SKIPPED` steps do not change the outcome on their own; they follow an existing failure
-or cancellation.
-
-## Doctor
-
-```bash
-local-ci-runner doctor
+settings:
+  failFast: false
+  timeoutMs: 600000
 ```
 
-Doctor is **diagnostic only** — it never executes the pipeline. It checks:
+Every step id above is a built-in check of that project's ecosystem, except
+`contract-test`, which is defined by `run:`. No step is meant to be `BLOCKED` or
+`UNSUPPORTED`, but each project needs its own setup:
 
-- **Environment** — OS/architecture, Node version against `engines.node` or `.nvmrc`,
-  npm/pnpm/yarn and Git availability, browser detection, Angular detection.
-- **Project** — `package.json`, `angular.json` (when Angular is declared), lockfile
-  and which package manager it implies, dependency installation state, package manager
-  declared in `packageManager` versus the lockfile.
-- **Configuration** — `.local-ci.yml` exists, parses and validates; configured
-  pipeline steps are identified as known or unsupported.
-- **Requirements** — declared required environment variables, presence only.
+- **`web`** (`node`): `apps/web/package.json` with `test` and `build` scripts, a lockfile
+  (`install` is `BLOCKED` without one), and `apps/web/scripts/contract-test.js`. The `run:`
+  path is resolved from the project directory.
+- **`ml`** (`python`): pytest configuration (for example `[tool.pytest.ini_options]` in
+  `ml/pyproject.toml`), and pytest installed in `ml/.venv` or the interpreter on `PATH`.
+  Without the configuration, `test` is `UNSUPPORTED`. Without pytest installed, it is
+  `BLOCKED`.
+- **`gateway`** (`go`): `services/gateway/go.mod`, with `go` and `gofmt` on `PATH`.
+  Without them, all four steps are `BLOCKED`, and only this project is affected.
 
-Every check is reported as one of:
+Running `local-ci-runner doctor` shows which of these is missing.
 
-| Severity | Meaning |
-|---|---|
-| `PASS` | Verified good — the check actually ran and the answer is yes. |
-| `WARNING` | Off but workable; the pipeline can still run. |
-| `BLOCKED` | A known requirement prevents execution. |
-| `UNSUPPORTED` | local-ci-runner cannot perform this capability. |
-| `ERROR` | The check itself failed; the answer is genuinely unknown. |
-| `UNKNOWN` | Deliberately unverified — reported, never promoted to `PASS`. |
+- Run it from the repository root (where `.local-ci.yml` is). Steps run inside each
+  project's `path`.
+- Step ids are qualified in reports and logs (`web.build`), steps are shown as
+  `web: Production Build`. The console, `report.json` and `report.html` include a
+  per-project roll-up (`summary.json` does not).
+- `local-ci-runner run --project web` runs only that project. Repeat `--project` to run
+  several; an unknown name is an error.
+- A project that is `BLOCKED` (for example, Go is not installed) never stops another
+  project from running.
+- Project names use letters, digits, `_` and `-`, and must be unique.
 
-A requirement that could not actually be verified is reported as `UNKNOWN` or
-`WARNING`, never as satisfied.
+[`templates/monorepo.local-ci.yml`](templates/monorepo.local-ci.yml) has a larger example
+covering all seven ecosystems. `init --all` generates a `projects:` list from what is on
+disk (see [`init`](#init)).
 
-## Preflight
+### Custom commands (`run:`)
 
-```bash
-local-ci-runner preflight
+*(Unreleased.)* When a check has no built-in form, give the exact command as an argument list:
+
+```yaml
+version: 1
+
+project:
+  type: node
+
+pipeline:
+  - contract-test
+
+steps:
+  contract-test:
+    run: [node, scripts/contract-test.js, --strict]
+    cwd: tools
+    timeoutMs: 600000
 ```
 
-Preflight answers: "Can this configured pipeline reasonably run on this machine?"
+- **An argument list, never a shell string.** Nothing is split, quoted, expanded or
+  globbed, so `$(...)`, `&&`, `*` and `%PATH%` reach the program as literal text.
+- `run[0]` is either a bare program name, looked up on `PATH` using only absolute `PATH`
+  entries (the current directory is never searched), or a path inside the project. Paths
+  in `run[0]` and `cwd` may not be absolute or contain `..`, and must still be inside the
+  project after symbolic links are resolved.
+- Environment variables cannot be set from the file.
+- A program that cannot be found, or a file that is not executable, is `BLOCKED` before
+  anything runs. Run `.ps1` scripts, and `.sh` scripts on Windows, through their
+  interpreter: `[pwsh, -File, x.ps1]`, `[bash, x.sh]`.
+- **Windows `.cmd`/`.bat` files** are started through `cmd.exe`, which re-parses
+  arguments. An argument containing `% ! ^ & | < > " ( )` or a line break is rejected
+  (the step is `BLOCKED`), not escaped. This also applies to `npm`, `pnpm` and `yarn`
+  when you call them through `run:`. Call the underlying `.exe` or a `node` script instead.
 
-```
-LOCAL CI PREFLIGHT
+## CLI reference
 
-ENVIRONMENT
-  ✓ Node version           PASS
-  ✓ npm                    PASS
-  ✓ Browser                PASS
-
-PROJECT
-  ✓ package.json           PASS
-  ✓ .local-ci.yml          PASS
-  ✓ dependencies           PASS
-
-REQUIREMENTS
-  ✓ API_URL                PASS
-  ⚠ DATABASE_URL           [WARNING]
-
-PIPELINE
-  ✓ Pipeline               PASS
-
-Preflight: WARNING
-
-Recommendation:
-  Set DATABASE_URL before running the pipeline.
+```text
+local-ci-runner <command> [options]
 ```
 
-How `run` uses it:
-
-1. preflight runs before any step is executed,
-2. a `BLOCKED` condition prevents the affected steps from executing — they are
-   reported as `BLOCKED` with the reason, and the run exits non-zero,
-3. `UNSUPPORTED` steps are reported and still make the run non-zero, but they do not
-   stop the rest of the pipeline,
-4. warnings never block — the pipeline runs and the warnings are recorded in the
-   report.
-
-A blocker scoped to particular steps (for example a missing browser) blocks only
-those steps: `test` can be blocked while `install` and `build` still run.
-
-## Environment fingerprint
-
-Every run records an environment fingerprint in its report: OS/platform, architecture,
-Node version, package manager and version, Git version, Angular (declared vs
-installed), browsers, project/framework, and a CI/local indicator derived from
-well-known CI marker *presence*.
-
-The fingerprint has no field that can carry a secret: no environment variable values,
-no `.env` contents, no credentials, no tokens. Comparing a local fingerprint against a
-CI one is future work; the shape is recorded now so reports are self-describing.
-
-## Browser detection
-
-For Angular/browser projects, local-ci looks for Chrome and Chromium in the standard
-install locations for each platform — Windows (`Program Files`, `%LOCALAPPDATA%`),
-macOS (`/Applications`) and Linux (`/usr/bin`, `/snap/bin`, …) — rather than one
-hard-coded path. Detection is a filesystem check; nothing is launched.
-
-- A project that declares a browser-driven runner (Karma, Protractor, Cypress, …)
-  with no browser found → `BLOCKED` for the test steps, with guidance to install one.
-- A project that runs tests but declares no browser-driven runner → `WARNING`.
-- Otherwise the absence of a browser is noted and does not block.
-
-local-ci never installs software automatically. If detection is unreliable the result
-is a warning or unknown, not a pass.
-
-## Node version requirements
-
-local-ci-runner itself requires Node.js 20.5.0 or later (the minimum its process
-runner, execa, supports). CI runs the full suite on Windows, macOS and Linux with Node
-20.x, 22.x and 24.x, and smoke-tests the packed CLI on exactly Node 20.5.0.
-
-For the project being checked, `engines.node` and `.nvmrc` are checked with a
-deliberately small range checker (no semver dependency). A range is alternatives
-separated by `||`; each alternative is comparators that must all hold, separated by
-whitespace or commas. Supported comparators: `>=`, `>`, `<=`, `<`, `=`, exact and
-partial versions (`20.11.0`, `20`), x-ranges (`20.x`, `*`), caret (`^18.19.0`) and tilde
-(`~18.19.0`). Whitespace after an operator is fine: `>= 18` means `>=18`.
-
-A range the checker cannot evaluate with confidence (dist-tags such as `lts/*`,
-hyphen ranges, text) is reported as `UNKNOWN` with guidance to verify manually —
-local-ci does not claim compatibility it could not check, and an unreadable part of a
-range is never treated as satisfied.
-
-## Process-tree cleanup
-
-A pipeline step is usually a package-manager shim that launches `node`, which may
-launch a bundler. Killing only the direct child leaves those descendants running and
-holding the CLI's output handles open — observed on Windows in the Phase 4 E2E, where
-a timed-out `npm` shim kept the CLI alive.
-
-local-ci terminates the whole process tree on timeout and on cancellation:
-
-- **Windows** — `taskkill /T /F` walks the tree rooted at the step's pid.
-- **macOS/Linux** — steps are spawned as process-group leaders (`detached`), so one
-  signal to the negated pid reaches every descendant.
-
-Termination is polite first (`TERM`), then forced after a grace period. No orphaned
-grandchildren should remain when local-ci exits. Platform-specific behaviour is
-covered by integration tests where the OS allows it; the rest is documented rather
-than guessed.
-
-## Known limitations
-
-- Not every ecosystem has been verified against its real tool; see [Verification
-  status](#verification-status). Checks that need a tool, a dependency or a configuration
-  the project does not have are `BLOCKED` or `UNSUPPORTED`, never skipped silently.
-- `doctor`, `preflight` and `run` check the Node.js version of the repository root for
-  the original single-project path, and `engines.node` per project for `projects`; they
-  do not read `.nvmrc` per project.
-- `settings.offline` is honoured by cargo, Gradle and Maven only.
-- Workspace member patterns are literal paths, `*` and a trailing `**`; anything else is
-  reported and not expanded.
-- `gofmt -l` is run on the module directories only; `go.work` entries outside the project
-  make the Go steps unavailable.
-- The range checker covers a subset of semver syntax; anything else is `UNKNOWN`.
-- Browser detection checks known install locations; a browser installed elsewhere is
-  not found (and is reported as such, never as a pass).
-- `.env` files are never loaded — set required variables in your shell.
-- Comparing a local run against CI is not implemented yet; the fingerprint is recorded
-  for it.
-
-Local CI helps you **run CI-style validation locally before pushing.** It does not
-promise 100% CI parity, it is not a CI replacement, and it cannot guarantee identical
-CI results — CI environments differ in ways no local tool can fully reproduce.
-
-## Step statuses
-
-Every run writes an artifact directory under the project — never in an OS temp
-directory, so a report is still readable after the run:
-
-```
-.local-ci/
-  reports/
-    20261008-123456-abcd1234/
-      report.json
-      summary.json
-      report.html
-      logs/
-        install.log
-        typecheck.log
-        test.log
-        build.log
-```
-
-A run id is `YYYYMMDD-HHmmss-<8 hex>`. Ids sort chronologically as plain strings
-and two runs in the same second still get separate directories.
-
-### report.json
-
-The complete machine-readable record: run id, project, framework, package
-manager, status, canonical outcome, start and end time, duration, exit code,
-coverage, per-status counts (including `blocked`, `error` and `timeout`), the
-environment fingerprint, the preflight that gated the run, and every step with
-its status, outcome, duration, exit code, signal, timeout and cancellation
-state, command line, error and log path.
-
-stdout and stderr are included as bounded excerpts so the file stays small. The
-complete output is in the step's log, which `logPath` points at.
-
-### summary.json
-
-A small, flat digest for quick consumption by another tool — no step output, no
-nesting:
-
-```json
-{
-  "schemaVersion": 1,
-  "runId": "20261008-123456-abcd1234",
-  "status": "FAIL",
-  "exitCode": 1,
-  "durationMs": 4458,
-  "projectName": "smoke-app",
-  "framework": "angular",
-  "packageManager": "npm",
-  "coverage": { "status": "unsupported", "percent": null },
-  "steps": {
-    "total": 3,
-    "passed": 2,
-    "failed": 1,
-    "unsupported": 0,
-    "skipped": 0,
-    "cancelled": 0,
-    "blocked": 0,
-    "error": 0,
-    "timeout": 0
-  },
-  "failures": [
-    { "id": "build", "name": "Production Build", "outcome": "FAIL", "reason": "..." }
-  ]
-}
-```
-
-When collected, the environment fingerprint (`environment`) and the gating
-preflight (`preflight`) are included here too. Both are derived once in the
-report model; no reporter re-derives them.
-
-A tool can decide whether a run passed by reading only this file.
-
-### report.html
-
-A dashboard with a header (run id, project, framework, package manager,
-timestamps, overall status, duration, exit code), summary cards, a step table
-(step, status, duration, exit code, details), expandable per-step output for
-failures, a separate section for unsupported capabilities, a section for skipped
-steps, and links to every step log.
-
-It is a single self-contained file: hand-written HTML plus one inline `<style>`.
-No frontend framework, no build step, no network fetch — it opens correctly from
-disk forever.
-
-### logs
-
-One log per **executed** step, holding that step's complete captured output
-within the Phase 2 capture cap:
-
-```
-# step: Production Build (build)
-status: FAIL
-duration: 1540 ms
-command: npm run build
-exitCode: 1
-
---- error ---
-Command failed with exit code 1: npm run build
-
---- stderr ---
-ERROR: Application bundle generation failed.
-```
-
-`UNSUPPORTED` and `SKIPPED` steps never ran, so they get **no log file**. Their
-reason is carried in `report.json` and shown in the HTML report instead. Writing
-a log for a step that never executed would be fabricated evidence.
-
-### Reading a report back
-
-```bash
-local-ci-runner report 20261008-123456-abcd1234
-```
-
-Prints the stored run's console report. Run the command with no argument to list
-the run ids that exist. An unknown or malformed run id produces one readable
-sentence — never a stack trace — and exits non-zero. Run ids are validated before
-they reach the filesystem, so a value like `../../etc/passwd` is rejected.
-
-### Reporting failures
-
-Reports are generated for failed, timed-out, cancelled and unsupported runs. The
-report is most valuable exactly when CI fails.
-
-If writing an artifact fails, the original pipeline result still governs the
-outcome, each artifact is attempted independently, a clear reporting error is
-printed, and the exit code is non-zero. Reporting can only ever *add* a failure;
-it can never turn a failing run into a reported `PASS`.
-
-## Coverage
-
-Coverage is reported only when a real coverage tool produced a number.
-
-Local CI reads the Istanbul summary report at `coverage/coverage-summary.json`
-and uses `total.lines.pct`. That format has a fixed, documented schema, so the
-value is parsed rather than guessed. Output is never scraped with a regex to
-manufacture a percentage, and a stale summary left by an earlier run is never
-adopted — the file is consulted only when this run's coverage step passed.
-
-Three states, kept distinct:
-
-| State | Meaning |
-|---|---|
-| `84.72%` | A measured percentage, with its source file named. |
-| `unavailable` | Coverage ran but produced no summary. Something is missing from the project. |
-| `UNSUPPORTED` | There is no coverage step, or the adapter declined to run one. Nothing was attempted. |
-
-`0%` is only ever shown when coverage genuinely measured zero. No measurement is
-never reported as `0%`.
-
-## Step statuses
-
-| Status | Meaning | Log file? |
+| Command | Options | What it does |
 |---|---|---|
-| `PASS` | The step completed successfully. | yes |
-| `FAIL` | The step failed, threw, or timed out (`timedOut: true`). | yes |
-| `BLOCKED` | A known requirement (tool, variable, capability) prevented execution. | no |
-| `UNSUPPORTED` | local-ci-runner cannot execute this capability. Nothing ran. | no |
-| `SKIPPED` | Not run, because of `failFast` or cancellation. | no |
-| `CANCELLED` | Interrupted by cancellation (Ctrl+C). | yes |
-| `ERROR` | An unexpected internal/system error prevented a meaningful verdict. | no |
+| `init` | `--force`, `--dry-run`, `--type <type>`, `--path <dir>`, `--all`, `--scan-depth <n>`, `--ignore <name>` | Detect the project and write `.local-ci.yml`. In 0.2.0 only `--force` exists. |
+| `validate` | | Check `.local-ci.yml` against the schema and print the effective step timeout. |
+| `doctor` | | Diagnose the environment, the projects and the configuration. Never runs a step or installs anything. |
+| `preflight` | | Ask whether the configured pipeline can run here. This is the same gate `run` applies first. |
+| `run` | `-p, --project <name>` (repeatable) | Run preflight, then the pipeline, then write the reports. 0.2.0 has no options. |
+| `report` | `[run-id]` | Print a stored run's console report. Without an id, print usage and the stored run ids, and exit 1. |
+| `version` | (also `-V`, `--version`) | Print the version. |
 
-The canonical run outcomes add `TIMEOUT`: the engine reports a timeout as `FAIL` with
-`timedOut: true`, and reporting classifies it as its own outcome so the cause stays
-visible instead of hiding inside "failed".
-
-These are never collapsed into each other, in the console, in JSON or in HTML:
-
-```
-BLOCKED ≠ PASS    UNSUPPORTED ≠ PASS    SKIPPED ≠ PASS
-TIMEOUT ≠ PASS    CANCELLED ≠ PASS      ERROR ≠ PASS
-```
-
-Only `PASS` is success, and only an all-`PASS` run exits zero.
-`Coverage UNSUPPORTED` is a different fact from `Build FAIL` and from
-`Security SKIPPED`, and the HTML report gives unsupported steps their own section
-that states plainly that they did not run.
-
-## Security model
-
-- Commands are executed as an executable plus an argument vector. No shell is invoked and
-  no command string is built from configuration values.
-- Captured output is truncated and masked: values of environment variables whose names
-  look like credentials, and values passed to credential-style flags such as `--token`,
-  are replaced with `***`. Names match on words such as `TOKEN`, `SECRET`, `PASSWORD`,
-  `AUTH`, `CONNECTION_STRING` and `WEBHOOK`, and on whole name segments `PAT`, `KEY`,
-  `PWD`, `PASS` and `DSN` (so `GH_PAT`, `AZURE_DEVOPS_EXT_PAT` and `STRIPE_KEY` are
-  masked while `PATH` and `KEYBOARD_LAYOUT` are not).
-- Credentials with a recognisable *format* are masked even when no environment
-  variable reveals them: `Authorization:` header values, `Bearer` tokens, JWTs, GitHub
-  (`ghp_…`, `github_pat_…`) and npm (`npm_…`) tokens, `.npmrc` `_authToken=` values,
-  Slack tokens, AWS access key ids, and `Password=` / `AccountKey=` values in
-  connection strings.
-- Reports live under `.local-ci/`, which ignores itself through `.local-ci/.gitignore`.
-  Masking is a safety net, not a guarantee — a secret printed in an unrecognised form
-  is not masked — so stored reports are kept out of version control as well.
-- Passwords embedded in URLs are masked structurally. A tool that prints
-  `postgres://admin:s3cr3t@db.internal` has told us nothing to match against, but
-  userinfo is a defined part of the URL grammar, so the password is masked while
-  the host and user remain readable.
-- Masking runs before truncation, so a limit can never slice a mask in half and leave a
-  partial secret visible.
-- Redaction is applied twice and independently: once when output is captured, and
-  again when the report model is built. A step that produces output by some route
-  other than a captured child process is still covered.
-- `.env` files are never read. Nothing in the reporting path opens them.
-- Environment variable *values* are never serialized into reports or logs, and
-  absolute paths are never recorded. The only environment-derived facts that reach a
-  report are tool versions and a CI/local boolean — see the environment fingerprint.
-- Required environment variables are checked for presence only; their values are
-  never read, printed or stored.
-- Every value interpolated into `report.html` is HTML-escaped, so an error message
-  containing `<script>` is displayed rather than executed.
-- A package manager is never installed, switched, or silently replaced
-- `npm audit` contacts the npm registry to check advisories, which is the point
-  of the step; nothing else is uploaded and no telemetry is sent
-- Secret values are read only to mask them. They are never stored on a result
-  object and never written to disk.
-- There is no telemetry, no source upload and no secret collection.
-
-`local-ci-runner doctor` distinguishes a tool that is not installed from one that could not be
-checked because process execution was blocked. It never marks an unchecked tool as a pass.
-
-## Architecture notes
-
-### Core (framework-agnostic)
-
-- `src/core/process-runner.ts` — one child process. Never throws for process failures;
-  a missing executable, non-zero exit, timeout and cancellation all resolve to a
-  structured result.
-- `src/core/process-step.ts` — generic adapter bridge: turns a command plus arguments
-  into a `PipelineStep`. Adapters decide *which* command to run; this decides *how*.
-- `src/core/step-runner.ts` — step lifecycle, timeout and cancellation. Always resolves
-  to a structured result; a thrown exception can never become `PASS`.
-- `src/core/pipeline-runner.ts` — ordering, `failFast`, preflight-blocked steps, aggregation and the overall result.
-- `src/core/status.ts` — the canonical result vocabulary: `StepStatus`, `RunOutcome`
-  (including `TIMEOUT`), aggregation and exit-code rules. The non-`PASS` invariant lives here.
-- `src/core/process-tree.ts` — cross-platform process-tree termination (taskkill on
-  Windows, process-group signal on POSIX), used on timeout and cancellation.
-
-### Diagnostics and environment
-
-- `src/diagnostics/types.ts` — the shared severity model (`PASS`/`WARNING`/`BLOCKED`/`UNSUPPORTED`/`ERROR`/`UNKNOWN`),
-  verdict derivation and blocker scoping. Only `BLOCKED` and `ERROR` block execution.
-- `src/diagnostics/facts.ts` — read-only observations about the project on disk.
-  Observations, not verdicts; doctor and preflight decide what they mean.
-- `src/diagnostics/doctor.ts`, `preflight.ts` — the check sets behind `local-ci-runner doctor`
-  and `local-ci-runner preflight`, and the gate `run` consults before executing.
-- `src/env/fingerprint.ts` — the environment fingerprint. Structured so no field can
-  carry a secret.
-- `src/env/semver.ts` — deliberately small range checker; unresolvable ranges are
-  `UNKNOWN`, never satisfied.
-- `src/env/tools.ts`, `browser.ts` — three-state tool probes (found / missing /
-  blocked) and cross-platform browser detection.
-
-### Reporting
-
-- `src/reporters/report-model.ts` — **the single derivation point**. Masks every string,
-  bounds every excerpt, computes counts and coverage, and hands every reporter the same
-  immutable model. Pure: no I/O, no mutation.
-- `src/reporters/paths.ts` — deterministic artifact layout and run-id validation. Run ids
-  are treated as untrusted on the way back in.
-- `src/reporters/coverage.ts` — reads the Istanbul summary and derives the three coverage
-  states. Never invents a number.
-- `src/reporters/metadata.ts` — project facts the engine does not carry.
-- `src/reporters/console.ts` — plain-text console report, plus the ora progress reporter
-  used only while a step is genuinely in flight.
-- `src/reporters/json.ts`, `summary.ts`, `html.ts`, `logs.ts` — renderers. Each one
-  serializes the model and adds nothing of its own.
-- `src/reporters/artifact.ts` — writes every artifact independently, so one failure
-  cannot cost the others, and never throws away the run result.
-
-Process execution, reporting and file persistence are separate: `ProcessRunner`
-produces data and knows nothing about reports, HTML or the log layout.
-
-## Roadmap
-
-1. CLI foundation — done
-2. CI engine: timeouts, cancellation, logging — done
-3. Angular adapter — done
-3a. Node.js, .NET, Python, Java, PHP, Go and Rust adapters, monorepo `projects`, `run:` steps — implemented; real-toolchain verification pending for the tools listed under [Verification status](#verification-status)
-4. Console/JSON/HTML reporting expansion — done
-5. Preflight / doctor / environment readiness — done
-6. Azure DevOps YAML adapter/importer with explicit unsupported-task results — not started
-7. Local-versus-CI fingerprint comparison — not started (fingerprint is recorded)
-
-Docker and AI integrations remain optional future features.
-
-## Development
+### `init`
 
 ```bash
-npm install
-npm run typecheck
-npm test
-npm run build
-node demo/phase2-demo.mjs
-node demo/phase4-cancel-e2e.mjs
-node demo/phase4.5-process-tree.mjs
+local-ci-runner init                            # one project: write .local-ci.yml
+local-ci-runner init --dry-run                  # print it, write nothing
+local-ci-runner init --all                      # every detected project, as "projects:"
+local-ci-runner init --path apps/web --type react
+local-ci-runner init --scan-depth 5 --ignore legacy
+local-ci-runner init --force                    # replace an existing file
 ```
 
-`demo/phase2-demo.mjs` exercises PASS, FAIL, `failFast` both ways, unsupported steps,
-timeout, cancellation and credential masking against deterministic commands.
+- When several projects are found, `init` writes nothing. It lists each project with the
+  exact `init --path … --type …` command to choose it, and suggests `--all`.
+- `--all` also writes nothing if any detected project has no runnable check, and prints
+  the reason for each step.
+- Discovery uses workspace metadata first (`workspaces`, `pnpm-workspace.yaml`,
+  `go.work`, Cargo `[workspace]`, solutions, Maven `<modules>`, Gradle `include`), then
+  scans 3 levels deep by default (`--scan-depth` 0-8). It skips `node_modules`, `.git`,
+  `bin`, `obj`, `target`, `vendor`, `dist`, `build`, `.venv` and similar, and never
+  follows symbolic links. Members, weak candidates, directories beyond the depth limit,
+  and workspace patterns it cannot expand are reported, not silently dropped.
+- `--type` within the JavaScript family is only a label. For another ecosystem it must
+  match what is on disk (`--type python` with no Python project is an error).
 
-`demo/phase4-cancel-e2e.mjs` runs the **built** `dist/` output against a temporary
-Angular project and cancels it mid-run, asserting that a cancelled run still writes
-`report.json`, `summary.json`, `report.html` and only the log for the step that
-actually ran.
+### `run`
+
+```bash
+local-ci-runner run                             # whole pipeline
+local-ci-runner run --project web --project api # only these projects
+```
+
+Press Ctrl+C to cancel. The running step's whole process tree is terminated and the step
+is marked `CANCELLED`, the remaining steps are `SKIPPED`, reports are still written, and
+the command exits non-zero.
+
+### `report`
+
+```bash
+local-ci-runner report                          # usage + stored run ids (exits 1)
+local-ci-runner report 20261015-120540-a16ce8a4 # print that run's report
+```
+
+Without a run id, `report` prints its usage line and the 10 most recent stored run ids
+(or "No stored reports were found") to stderr, and exits **1**. With a valid id it prints
+the stored report and exits **0**, even when that run failed: the stored run's own result
+is in the report, not in this command's exit code. Run ids are validated before they reach
+the filesystem: a value like `../bad`, or an id with no stored report, is rejected with one
+readable sentence and the list of real runs, and exits 1.
+
+### Exit codes
+
+Every non-zero exit code is `1`.
+
+| Command | Exits `0` when | Exits `1` when |
+|---|---|---|
+| `run` | every step is `PASS` and all reports were written | any step is `FAIL`, `TIMEOUT`, `BLOCKED`, `UNSUPPORTED`, `CANCELLED` or `ERROR`; a report artifact could not be written; the configuration is missing or invalid; `--project` names an unknown project |
+| `doctor`, `preflight` | the verdict is `PASS` or `WARNING` | the verdict is `BLOCKED` or `ERROR` |
+| `validate` | the configuration is valid | it is missing, unreadable or invalid |
+| `init` | the file was written (or printed with `--dry-run`) | it refused to write (existing file without `--force`, several projects, nothing runnable) or an option was invalid |
+| `report` | a stored report was printed | no run id, an invalid id, or no readable report for that id |
+
+`doctor` and `preflight` treat `UNKNOWN` and `UNSUPPORTED` checks as a `WARNING`, so they
+can exit 0 for a pipeline that `run` will then fail with `UNSUPPORTED` steps. Read their
+output, not just the exit code.
+
+## Reports and diagnostics
+
+### Where reports are written
+
+Every `run`, including failed, blocked, timed-out and cancelled runs, writes a directory
+under the folder you ran it from:
+
+```text
+.local-ci/
+  .gitignore                 # "*": reports never get committed
+  reports/
+    20261015-120655-499b6d68/
+      report.json            # complete record
+      summary.json           # small, flat digest
+      report.html            # self-contained dashboard, opens from disk
+      logs/
+        web.install.log      # one log per step that actually ran
+        web.build.log
+```
+
+A run id is `YYYYMMDD-HHmmss-<8 hex>`, and `run` prints the id and every artifact path at
+the end. A single-project run names its logs by step id (`build.log`). A `projects:` run
+qualifies them (`web.build.log`).
+
+- **Console:** one line per step, a reason for every failed or blocked step, the
+  preflight result, and coverage.
+- **`report.json`:** run id, project, package manager, status and outcome, timing, exit
+  code, coverage, per-status counts, environment fingerprint (OS, architecture, tool
+  versions, CI/local marker; never variable values), the preflight that gated the run,
+  the per-project roll-up, and every step with its command line, exit code, error,
+  bounded output excerpts and `logPath`.
+- **`summary.json`:** `status`, `exitCode`, step counts and a `failures` list. A tool can
+  decide whether a run passed by reading only this file.
+- **`report.html`:** summary cards, a step table, expandable output for failures and
+  separate sections for unsupported and skipped steps. It is a single file with no
+  external assets.
+- **Logs:** the complete captured output of each executed step, headed by its status,
+  duration, command and exit code. `BLOCKED`, `UNSUPPORTED` and `SKIPPED` steps never
+  ran, so they get no log file, and their reason is in the reports instead.
+
+### Step statuses
+
+| Status | Meaning | Log file |
+|---|---|---|
+| `PASS` | The check ran and succeeded. | yes |
+| `FAIL` | The check ran and failed: non-zero exit, or output judged as a failure (`gofmt -l`). | yes |
+| `TIMEOUT` | The check exceeded its time limit. The step is a `FAIL` with `timedOut: true`, and reports classify it separately. | yes |
+| `BLOCKED` | A known requirement is missing: a tool, a JDK, installed dependencies, a lockfile, a required variable, or a project that is not what its type says. Nothing ran. | no |
+| `UNSUPPORTED` | There is nothing to run for this project: no script, no tool configuration, or an unknown step id. Nothing ran. | no |
+| `SKIPPED` | Deliberately not run, because of `failFast` or cancellation. | no |
+| `CANCELLED` | Interrupted by Ctrl+C. | yes |
+| `ERROR` | An internal fault prevented a verdict. | no |
+
+None of these is ever reported as `PASS`, and a pipeline made only of unsupported steps
+fails. The console shows both `Result` (pass or fail) and, when it is more specific, an
+`Outcome` such as `BLOCKED` or `TIMEOUT`.
+
+**Coverage** is read only from a real Istanbul `coverage/coverage-summary.json` written by
+this run's passing `coverage` step. Otherwise it is shown as `unavailable` or
+`UNSUPPORTED`, never as an invented `0%`.
+
+### Investigating a failed or blocked step
+
+1. Read the reason the console prints under **Failed step** or **Blocked step**. A block
+   names the missing requirement and the fix.
+2. Run `local-ci-runner report <run-id>` to see a stored run again, or open
+   `report.html`.
+3. Open `logs/<step>.log` for the step's complete output and exact command.
+4. Run `local-ci-runner doctor` to see, for each project, what can run, the evidence it
+   is based on, and what is missing.
+
+`doctor` and `preflight` rate each check as `PASS`, `WARNING` (workable; never blocks),
+`BLOCKED`, `UNSUPPORTED`, `ERROR` (the check itself failed) or `UNKNOWN` (could not be
+verified, so it is never counted as a pass). Only `BLOCKED` and `ERROR` stop steps from
+running, and a blocker that applies to particular steps (for example, a missing browser
+for tests) blocks only those steps.
+
+## Security and execution model
+
+- **No shell.** Every step is an executable plus an argument vector. No command string
+  is built from configuration values.
+- **Path containment** *(unreleased)*. `project.path`, `run[0]` paths and `cwd` must be
+  relative, free of `..`, and inside the repository or project after symbolic links are
+  resolved. Bare program names are looked up only in absolute `PATH` entries.
+- **Windows batch-file gate** *(unreleased)*. Arguments that `cmd.exe` would reinterpret
+  are rejected for `.cmd`/`.bat` programs instead of being escaped. A project path that
+  contains those characters cannot use batch wrappers and is `BLOCKED`.
+- **Not a sandbox.** Project scripts, build tools and `run:` commands execute with your
+  user account's full permissions, file access and network access. A configuration file
+  can choose which program runs, so only run `.local-ci.yml` files and projects you trust.
+- **Secret masking is a safety net, not a guarantee.** Before output reaches a report or
+  log, it masks:
+  - the values of environment variables with credential-like names (`TOKEN`, `SECRET`,
+    `PASSWORD`, `PAT`, `KEY`, `PWD`, `DSN` and others);
+  - values passed to credential flags such as `--token`;
+  - `Authorization`/`Bearer` values, JWTs, GitHub, npm and Slack tokens, and AWS access
+    key ids;
+  - passwords in connection strings and URLs.
+
+  A secret printed in an unrecognised form is not masked, so keep `.local-ci/` out of
+  version control (it ignores itself).
+- **No data collection.** There is no telemetry and no upload. `.env` files are never
+  read, environment variable values are never written to reports, and required variables
+  are checked for presence only.
+- **Network use comes from the tools.** `npm audit`/`pnpm audit`, dependency installs and
+  restores, and Maven/Gradle wrappers contact their registries. `settings.offline` covers
+  only cargo, Gradle and Maven.
+- **Process-tree cleanup.** On timeout or cancellation, the whole tree is terminated:
+  `taskkill /T /F` on Windows, and a process-group signal on macOS and Linux (TERM, then
+  KILL).
+
+## Requirements and troubleshooting
+
+### Requirements
+
+- **Node.js 20.5.0 or later** to run the CLI (`engines` in `package.json`). CI runs the
+  test suite on Windows, macOS and Linux with Node 20, 22 and 24, and smoke-tests the
+  packed CLI on Node 20.5.0 (Ubuntu and Windows).
+- **The project's own toolchain** on `PATH`, or the project's wrapper or virtual
+  environment:
+  - npm, pnpm, Yarn or Bun;
+  - `dotnet`;
+  - `python`;
+  - `java` plus `mvn`/`gradle` or a wrapper;
+  - `php` and `composer`;
+  - `go` and `gofmt`;
+  - `cargo`, plus `rustfmt`/`clippy` for those steps.
+
+  Toolchains are never downloaded for you.
+- **Declared minimums are enforced:** `engines.node`/`.nvmrc`, `global.json`,
+  `requires-python`, `composer.json` `require.php`, the `go.mod` `go` line, and a Maven
+  `release` of 9+. A version range the checker cannot evaluate is reported as `UNKNOWN`,
+  not as satisfied.
+- **Browsers:** in a single-project configuration without `project.path` whose type is
+  `angular` (or a type with no built-in adapter), if the project's tests use a
+  browser-driven runner (Karma, Protractor, Cypress and similar), `doctor` and `preflight`
+  look for Chrome or Chromium in the standard install locations. If none is found, the
+  test steps are `BLOCKED`. A browser installed elsewhere is not found. Other Node.js
+  types (`node`, `react`, `vue`, …), `project.path` and `projects:` configurations do not
+  check for a browser.
+
+### Diagnosing problems
+
+```bash
+local-ci-runner validate             # is .local-ci.yml valid? which timeout applies?
+local-ci-runner doctor               # what each project can run, and why not
+local-ci-runner preflight            # would run start, or what blocks it?
+local-ci-runner init --all --dry-run # what would be generated from what is on disk
+```
+
+| You see | Meaning and fix |
+|---|---|
+| `Missing .local-ci.yml. Run "local-ci-runner init" first.` | You are not in the directory that holds the configuration. `cd` there, or run `init`. |
+| `Invalid .local-ci.yml:` followed by `- settings: Unrecognized key: "timeoutms"` | A key is misspelled or not supported. Each problem is listed with its path. |
+| `needs X, but X was not found on PATH` (`BLOCKED`) | Install the tool. Only the steps that need it are blocked. |
+| `… was found, but "X --version" did not report a version` | The tool is installed but broken. Repair it. |
+| `needs pytest (python -m pytest), but it is not available` | Install pytest into the interpreter `doctor` names (the project's `.venv`, or the global one). |
+| `node_modules is missing … no earlier install step` | Install dependencies, or add `install` before the step. |
+| `UNSUPPORTED`, e.g. `No "lint" script in package.json` | The project has no script or configuration for that check. Add one, or remove the step. |
+| `install` is `BLOCKED` with no lockfile | Commit a lockfile, or install dependencies yourself and remove `install`. |
+| `more than one solution` / `both Maven … and Gradle` | Point `project.path` at one, or define the steps with `run:`. |
+| `mvnw is not executable` | `chmod +x mvnw`. |
+| `Projects not in the configuration` | A project exists that `.local-ci.yml` never runs. Add it, or check `init --all --dry-run`. |
+| Passes locally, fails in CI (or the reverse) | Compare tool versions in the report's environment fingerprint with CI's. Check for CI-only secrets, services, OS differences and caches; Local CI Runner does not reproduce them. |
+
+**Platform notes**
+
+- **Windows:** `.cmd`/`.bat` shims (`npm`, `mvnw.cmd`, `gradlew.bat`, `vendor\bin\*.bat`)
+  are supported, subject to the batch-file gate above.
+- **macOS/Linux:** wrappers and `vendor/bin` tools must be executable.
+- **npm `allow-scripts`:** `npm test`, `npm run` and `npx` export your npm settings to
+  child processes as `npm_config_*` variables. With npm 11 and an `allow-scripts`
+  setting, a child `npm ci` can fail with `EALLOWSCRIPTS`. That is npm's behaviour. Run
+  `local-ci-runner` directly, or unset the variable.
+
+## Development and contributing
+
+```bash
+git clone https://github.com/dm-bishnoi/local-ci.git
+cd local-ci
+npm ci
+npm run typecheck      # tsc --noEmit
+npm test               # vitest run (the full suite takes several minutes)
+npm run build          # compile to dist/
+npm run dev -- doctor  # run the CLI from source with tsx
+```
+
+- `tests/real` runs the real toolchains. Tests for tools you do not have are skipped,
+  unless you require them all, as CI does:
+
+  ```bash
+  LOCAL_CI_REAL_TOOLCHAINS=required npx vitest run tests/real
+  ```
+
+- `demo/phase2-demo.mjs`, `demo/phase4-cancel-e2e.mjs` and
+  `demo/phase4.5-process-tree.mjs` exercise the engine, cancellation against the built
+  CLI, and process-tree cleanup.
+- Layout:
+  - `src/core`: process, step and pipeline engine, statuses.
+  - `src/ecosystems`: detection and per-ecosystem adapters.
+  - `src/adapters/angular`
+  - `src/config`: schema and loader.
+  - `src/diagnostics`: doctor and preflight.
+  - `src/reporters`
+  - `src/env`: tool probes, browsers, fingerprint.
+
+**Contributing.** Open an issue or a pull request on
+[GitHub](https://github.com/dm-bishnoi/local-ci).
+- Add tests with every behaviour change, and keep `npm run typecheck`, `npm test` and
+  `npm run build` passing.
+- Do not document an ecosystem, tool or platform as verified unless a test has run it
+  for real.
+- Changes are recorded in [`CHANGELOG.md`](CHANGELOG.md).
+
+## Roadmap and limitations
+
+**Implemented**
+
+- The pipeline engine: timeouts, cancellation, process-tree cleanup and `failFast`.
+- The Angular adapter and `package.json` script steps (released in 0.2.0).
+- `doctor`, `preflight`, the environment fingerprint, and console/JSON/HTML/log reports
+  with secret masking.
+- *(Unreleased)* Node.js, .NET, Python, Java, PHP, Go and Rust adapters, `projects:`,
+  `run:` steps, project discovery in `init`, and `settings.offline`.
+
+**Not implemented**
+
+- **Azure DevOps and GitHub Actions YAML are not imported or executed.** `.local-ci.yml`
+  is the only configuration, and there is no automatic support for arbitrary CI
+  pipelines or build tools.
+- Comparing a local run's fingerprint with a CI run's (the fingerprint is recorded for
+  this).
+- Docker or service containers, and sandboxed execution.
+
+**Known limitations**
+
+- The version-range checker supports a subset of semver (`>=`, `<`, `^`, `~`, x-ranges,
+  `||`). Anything else is `UNKNOWN`.
+- Workspace patterns support literal paths, `*` and a trailing `**`. Others are
+  reported, not expanded.
+- Browser detection checks only standard install locations.
+- `.env` files are never loaded. Set required variables in your shell.
+- See [Verification status](#verification-status) for which ecosystems have been run
+  against real tools.
+
+## License
+
+[MIT](LICENSE)
