@@ -14,6 +14,10 @@ describe('probeToolState', () => {
   });
 
   it('is "timed-out", not "failed", for a command that is merely slow', async () => {
-    expect(await probeToolState('node', ['-e', 'setTimeout(()=>{},10000)'], 300)).toBe('timed-out');
+    // Windows runs the probe through cmd.exe, so the script must not contain shell metacharacters
+    // (an arrow function's `>` is a redirect there). Waiting on stdin, which stays open, never ends.
+    const started = Date.now();
+    expect(await probeToolState('node', ['-e', 'process.stdin.resume()'], 300)).toBe('timed-out');
+    expect(Date.now() - started).toBeGreaterThanOrEqual(250);
   });
 });
