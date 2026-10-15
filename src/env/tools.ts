@@ -12,10 +12,11 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { resolveOnPath } from '../core/resolve-executable.js';
 
 const execFileAsync = promisify(execFile);
 
-export const PROBE_TIMEOUT_MS = 8_000;
+export const PROBE_TIMEOUT_MS = 20_000;
 /** Most `--version` flags print on the first line; cap it so output stays bounded. */
 const MAX_VERSION_CHARS = 64;
 
@@ -86,7 +87,18 @@ function extractVersionStrict(output: string): string | undefined {
  * Executing the tool is preferred over a bare `where`/`which` because it yields
  * the version too, and a version is what makes a diagnostic actionable.
  */
-export async function probeTool(name: string, versionArgs: readonly string[] = ['--version']): Promise<ProbeResult> {
+export async function probeTool(
+  name: string,
+  versionArgs: readonly string[] = ['--version'],
+  options: { env?: NodeJS.ProcessEnv; requireZeroExit?: boolean; timeoutMs?: number } = {},
+): Promise<ProbeResult> {
+  // A bare name is looked up on PATH first, by this program rather than by a
+  // shell, so "not installed" is the same answer on every platform and in every
+  // locale (cmd.exe's "is not recognized" message is translated).
+  if (!/[\\/]/.test(name) && (await resolveOnPath(name)) === null) {
+    return { outcome: 'missing', detail: `${name} was not found on PATH.` };
+  }
+
   try {
     // On Windows, npm/pnpm/yarn are `.cmd` shims, and a `.cmd` file cannot be
     // spawned directly — Node refuses without a shell. The whole invocation is
@@ -95,24 +107,43 @@ export async function probeTool(name: string, versionArgs: readonly string[] = [
     // comes from this module's callers' fixed vocabulary and the arguments are
     // constants, never configuration or user input. Without this, every package
     // manager would read as ENOENT on Windows while `git` (a real .exe) passed.
-    const useShell = process.platform === 'win32';
-    const { stdout } = useShell
+    //
+    // A name that is a path (a project's virtual-environment interpreter, say)
+    // is a real executable, may contain spaces or shell metacharacters, and is
+    // therefore never given to a shell.
+    const useShell = process.platform === 'win32' && !/[\\/]/.test(name);
+    const env = options.env ? { ...process.env, ...options.env } : undefined;
+    const { stdout, stderr } = useShell
       ? await execFileAsync([name, ...versionArgs].join(' '), {
-          timeout: PROBE_TIMEOUT_MS,
+          timeout: options.timeoutMs ?? PROBE_TIMEOUT_MS,
           windowsHide: true,
           maxBuffer: 64 * 1024,
           shell: true,
+          ...(env ? { env } : {}),
         })
       : await execFileAsync(name, [...versionArgs], {
-          timeout: PROBE_TIMEOUT_MS,
+          timeout: options.timeoutMs ?? PROBE_TIMEOUT_MS,
           windowsHide: true,
           maxBuffer: 64 * 1024,
+          ...(env ? { env } : {}),
         });
-    const version = extractVersion(String(stdout));
+    // `java -version` writes to stderr even on success.
+    const version = extractVersion(String(stdout)) ?? extractVersionStrict(String(stderr));
     return version
       ? { outcome: 'ok', version, detail: version }
       : { outcome: 'ok', version: 'unknown', detail: `${name} responded but printed no recognizable version.` };
   } catch (error) {
+    // The executable does not exist: a definite answer, not an unverified one.
+    if (errorCode(error) === 'ENOENT') return { outcome: 'missing', detail: `${name} was not found on PATH.` };
+
+    // The probe was stopped for taking too long. That says nothing about whether the
+    // tool works (a loaded machine makes any process slow to start), so it is
+    // "could not be checked", never "missing" and never "present".
+    if ((error as { killed?: unknown }).killed === true) {
+      const seconds = Math.round((options.timeoutMs ?? PROBE_TIMEOUT_MS) / 1000);
+      return { outcome: 'blocked', detail: `${name} did not answer within ${seconds}s, so it could not be checked.` };
+    }
+
     if (isSpawnFailure(error)) {
       const code = errorCode(error);
       const blocked = code === 'EPERM' || code === 'EACCES';
@@ -124,6 +155,24 @@ export async function probeTool(name: string, versionArgs: readonly string[] = [
       };
     }
 
+    // A probe of a module or subcommand (`python -m pytest --version`,
+    // `cargo clippy --version`) has no business exiting non-zero: failing means
+    // it is not there. Its error text must not be mined for a version, because it
+    // routinely contains one by accident (an install path such as Python3.14-64).
+    if (options.requireZeroExit) {
+      const stderrText = String((error as { stderr?: unknown }).stderr ?? '');
+      const stdoutText = String((error as { stdout?: unknown }).stdout ?? '');
+      const firstLine =
+        [stderrText, stdoutText]
+          .flatMap((text) => text.split(/\r?\n/))
+          .map((line) => line.trim())
+          .find((line) => line.length > 0) ?? '';
+      return {
+        outcome: 'missing',
+        detail: firstLine ? `${name} ${versionArgs.join(' ')} failed: ${firstLine.slice(0, 200)}` : `${name} ${versionArgs.join(' ')} failed.`,
+      };
+    }
+
     // A non-zero exit from `--version` still means the executable exists: many
     // tools exit non-zero while still printing their version on stderr. Only a
     // real version number counts — see extractVersionStrict.
@@ -132,7 +181,17 @@ export async function probeTool(name: string, versionArgs: readonly string[] = [
     const version = extractVersionStrict(stderr) ?? extractVersionStrict(stdout);
     if (version) return { outcome: 'ok', version, detail: version };
 
-    return { outcome: 'missing', detail: `${name} was not found on PATH.` };
+    // The executable exists (a bare name was resolved above, a path got past
+    // ENOENT) but did not report a version, so it cannot be trusted to work.
+    const firstLine =
+      [stderr, stdout]
+        .flatMap((text) => text.split(/\r?\n/))
+        .map((line) => line.trim())
+        .find((line) => line.length > 0) ?? '';
+    return {
+      outcome: 'missing',
+      detail: `${name} was found, but "${name} ${versionArgs.join(' ')}" did not report a version${firstLine ? `: ${firstLine.slice(0, 200)}` : ''}.`,
+    };
   }
 }
 

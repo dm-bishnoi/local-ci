@@ -1,0 +1,58 @@
+# A mixed-language repository. Copy to the repository root as .local-ci.yml and
+# adjust the names, types, paths and pipelines to your projects.
+#
+# Run `local-ci-runner init --all --dry-run` to see a configuration generated from
+# what is actually in the repository, and `local-ci-runner doctor` to see what each
+# project can run and why a step is not available.
+version: 1
+
+projects:
+  # JavaScript / TypeScript: react, vue, angular, typescript, node.
+  - name: web
+    type: react
+    path: apps/web
+    pipeline: [install, typecheck, lint, test, build]
+
+  # .NET: restore, build, test, format.
+  - name: api
+    type: dotnet
+    path: services/api
+    pipeline: [restore, build, test]
+
+  # Python: test, lint, format, typecheck (each needs its tool configured and installed).
+  - name: ml
+    type: python
+    path: ml
+    pipeline: [test, lint]
+
+  # Go: format, vet, test, build.
+  - name: gateway
+    type: go
+    path: services/gateway
+    pipeline: [format, vet, test, build]
+
+  # Rust: check, test, build, format, lint.
+  - name: core
+    type: rust
+    path: crates/core
+    pipeline: [format, lint, test]
+
+  # Java: maven or gradle (or java). compile, test, verify, build.
+  - name: billing
+    type: maven
+    path: services/billing
+    pipeline: [compile, test, verify]
+
+  # PHP: install, test, analyse, format.
+  - name: admin
+    type: php
+    path: admin
+    pipeline: [install, test, analyse]
+    steps:
+      # A custom check: an argument list, never a shell string.
+      analyse:
+        run: [php, tools/check.php, --strict]
+
+settings:
+  failFast: false
+  timeoutMs: 600000

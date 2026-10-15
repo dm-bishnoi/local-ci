@@ -119,6 +119,18 @@ export interface ReportStep {
   stderrTruncated: boolean;
   /** True when stdout was longer than the excerpt limit. */
   stdoutTruncated: boolean;
+  /** Project the step belongs to; present only in multi-project runs. */
+  project?: string;
+}
+
+/** Per-project roll-up of a multi-project run. */
+export interface ProjectSummary {
+  name: string;
+  type: string;
+  path: string;
+  /** `aggregateOutcomes` of the project's steps. */
+  outcome: RunOutcome;
+  counts: StepCounts;
 }
 
 export interface StepCounts {
@@ -162,6 +174,8 @@ export interface RunReport {
   environment?: EnvironmentFingerprint;
   /** Result of the preflight that gated this run, when one ran. */
   preflight?: DiagnosticReport;
+  /** One entry per project; present only for the `projects:` form. */
+  projects?: ProjectSummary[];
   steps: ReportStep[];
   /** When the report itself was produced. */
   generatedAt: string;
@@ -196,6 +210,8 @@ export interface BuildRunReportOptions {
   environment?: EnvironmentFingerprint;
   /** Preflight that gated this run, when one ran. */
   preflight?: DiagnosticReport;
+  /** Projects of a multi-project run, in configuration order. */
+  projects?: ReadonlyArray<{ name: string; type: string; path: string }>;
   /** Clock injection point for deterministic tests. */
   now?: () => Date;
 }
@@ -329,7 +345,25 @@ function toReportStep(step: StepResult, secrets: readonly string[], excerptLimit
     stderr: stderr.text,
     stdoutTruncated: stdout.truncated,
     stderrTruncated: stderr.truncated,
+    ...(step.project !== undefined ? { project: step.project } : {}),
   };
+}
+
+/** Rolls steps up per project. A project with no recorded steps is SKIPPED, never PASS. */
+export function summarizeProjects(
+  projects: ReadonlyArray<{ name: string; type: string; path: string }>,
+  steps: readonly StepResult[],
+): ProjectSummary[] {
+  return projects.map((project) => {
+    const own = steps.filter((step) => step.project === project.name);
+    return {
+      name: project.name,
+      type: project.type,
+      path: project.path,
+      outcome: aggregateOutcomes(own.map((step) => outcomeOf(step))),
+      counts: countSteps(own),
+    };
+  });
 }
 
 /**
@@ -380,6 +414,9 @@ export function buildRunReport(options: BuildRunReportOptions): BuiltReport {
     outcome,
     ...(options.environment ? { environment: options.environment } : {}),
     ...(options.preflight ? { preflight: options.preflight } : {}),
+    ...(options.projects && options.projects.length > 0
+      ? { projects: summarizeProjects(options.projects, result.steps) }
+      : {}),
     steps,
     generatedAt: now().toISOString(),
   };
@@ -490,7 +527,38 @@ function decodeStep(value: unknown): ReportStep {
     stderr: readString(source, 'stderr'),
     stdoutTruncated: readBoolean(source, 'stdoutTruncated'),
     stderrTruncated: readBoolean(source, 'stderrTruncated'),
+    ...(readString(source, 'project') ? { project: readString(source, 'project') } : {}),
   };
+}
+
+function decodeCounts(value: unknown): StepCounts {
+  const source = isRecord(value) ? value : {};
+  return {
+    total: readNumber(source, 'total'),
+    passed: readNumber(source, 'passed'),
+    failed: readNumber(source, 'failed'),
+    unsupported: readNumber(source, 'unsupported'),
+    skipped: readNumber(source, 'skipped'),
+    cancelled: readNumber(source, 'cancelled'),
+    blocked: readNumber(source, 'blocked'),
+    error: readNumber(source, 'error'),
+    timeout: readNumber(source, 'timeout'),
+  };
+}
+
+function decodeProjects(value: unknown): ProjectSummary[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  return value.filter(isRecord).map((entry) => {
+    const outcome = entry['outcome'];
+    return {
+      name: readString(entry, 'name', 'project'),
+      type: readString(entry, 'type', 'unknown'),
+      path: readString(entry, 'path', '.'),
+      // An unrecognised outcome degrades to ERROR rather than being passed through as a success.
+      outcome: typeof outcome === 'string' && (RUN_OUTCOMES as readonly string[]).includes(outcome) ? (outcome as RunOutcome) : 'ERROR',
+      counts: decodeCounts(entry['counts']),
+    };
+  });
 }
 
 export class ReportFormatError extends Error {
@@ -574,6 +642,7 @@ export function decodeRunReport(value: unknown): RunReport {
     })(),
     ...(isRecord(value['environment']) ? { environment: value['environment'] as unknown as EnvironmentFingerprint } : {}),
     ...(isRecord(value['preflight']) ? { preflight: value['preflight'] as unknown as DiagnosticReport } : {}),
+    ...(decodeProjects(value['projects']) ? { projects: decodeProjects(value['projects'])! } : {}),
     steps,
     generatedAt: readString(value, 'generatedAt'),
   };

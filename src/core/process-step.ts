@@ -1,7 +1,14 @@
-import { runProcess, type ProcessExecutor } from './process-runner.js';
+import { runProcess, type ProcessExecutor, type ProcessResult } from './process-runner.js';
 import { describeCommand } from './redaction.js';
 import type { PipelineContext } from './context.js';
 import type { PipelineStep, StepResult } from './step-runner.js';
+
+/**
+ * A verdict on output, applied only to a process that exited 0 and was neither
+ * cancelled nor timed out. It can turn a pass into a failure (a formatter that
+ * lists files and still exits 0); it can never turn anything into a pass.
+ */
+export type ProcessEvaluator = (result: ProcessResult) => { status: 'PASS' } | { status: 'FAIL'; error: string };
 
 export interface ProcessStepOptions {
   id: string;
@@ -21,6 +28,8 @@ export interface ProcessStepOptions {
    * Adapters pass this through so a command can be observed without spawning.
    */
   exec?: ProcessExecutor;
+  /** Judges the output of a process that exited 0. */
+  evaluate?: ProcessEvaluator;
 }
 
 /**
@@ -61,7 +70,9 @@ export function createProcessStep(options: ProcessStepOptions): PipelineStep {
         input: options.input,
       });
 
-      const status = result.cancelled ? 'CANCELLED' : result.failed ? 'FAIL' : 'PASS';
+      let status: 'PASS' | 'FAIL' | 'CANCELLED' = result.cancelled ? 'CANCELLED' : result.failed ? 'FAIL' : 'PASS';
+      const verdict = status === 'PASS' && !result.timedOut ? options.evaluate?.(result) : undefined;
+      if (verdict?.status === 'FAIL') status = 'FAIL';
       const stepResult: StepResult = {
         id: options.id,
         name: options.name ?? options.id,
@@ -78,7 +89,8 @@ export function createProcessStep(options: ProcessStepOptions): PipelineStep {
 
       // Only surface stderr as the headline error when the process said nothing
       // more specific on stdout.
-      if (result.error) stepResult.error = result.error;
+      if (verdict?.status === 'FAIL') stepResult.error = verdict.error;
+      else if (result.error) stepResult.error = result.error;
       else if (result.stderr.trim()) stepResult.error = result.stderr.trim();
 
       return stepResult;

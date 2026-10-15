@@ -5,7 +5,7 @@
  * identically under cmd.exe and sh.
  */
 
-import { access, readFile, readdir } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runCommand } from '../../src/cli/commands/run.js';
@@ -13,7 +13,7 @@ import { doctorCommand } from '../../src/cli/commands/doctor.js';
 import { runDoctorChecks } from '../../src/diagnostics/doctor.js';
 import { runPreflightChecks } from '../../src/diagnostics/preflight.js';
 import { NO_BROWSERS, writeProject } from '../helpers/fixtures.js';
-import { withTempProject } from '../helpers/reports.js';
+import { newestRunIds, withTempProject } from '../helpers/reports.js';
 
 interface ReportedStep {
   id: string;
@@ -72,7 +72,7 @@ async function project(
 
 async function lastReport(cwd: string): Promise<{ report: Report; dir: string }> {
   const base = join(cwd, '.local-ci', 'reports');
-  const [runId] = (await readdir(base)).sort().reverse();
+  const [runId] = await newestRunIds(base);
   const dir = join(base, runId ?? '');
   return { report: JSON.parse(await readFile(join(dir, 'report.json'), 'utf8')) as Report, dir };
 }
@@ -384,7 +384,8 @@ describe('script steps: unsupported project types keep their old behaviour', () 
 
   it('reports nothing as passed when a non-Angular config scripts no steps', async () => {
     await withTempProject(async (cwd) => {
-      await project(cwd, { build: node('0') }, 'version: 1\nproject:\n  type: node\npipeline:\n  - build\n');
+      // An unrecognised type keeps the 0.2.x behaviour: only `steps:` entries run.
+      await project(cwd, { build: node('0') }, 'version: 1\nproject:\n  type: custom-thing\npipeline:\n  - build\n');
       expect(await runCommand(cwd, options)).toBe(1);
       expect(stepOf((await lastReport(cwd)).report, 'build').status).toBe('UNSUPPORTED');
     });

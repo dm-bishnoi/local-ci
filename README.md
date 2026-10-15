@@ -1,12 +1,383 @@
 # Local CI Runner
 
-Run configured Angular CI checks locally before pushing, with preflight diagnostics and console, JSON, and HTML reports.
+Run CI-style checks locally before pushing, for JavaScript/TypeScript (Node.js, Angular, React, Vue), .NET, Python, Java, PHP, Go and Rust, with preflight diagnostics and console, JSON, and HTML reports.
 
 > `npx @dm-bishnoi/local-ci-runner run`
 
-Local CI Runner is an npm CLI with a framework-agnostic core and framework adapters.
+Local CI Runner is an npm CLI with a framework-agnostic core and one adapter per ecosystem. See [Languages and ecosystems](#languages-and-ecosystems) for exactly which checks each one runs, what they need, and what has and has not been verified against the real tools. GitHub Actions and Azure DevOps YAML are not interpreted: `.local-ci.yml` is the configuration.
 
-**Current support:** the built-in project adapter targets Angular. Any other project can run its own `package.json` scripts through the `steps` section (see below). Generic Node.js/pnpm project detection and GitHub Actions YAML execution are not included in version 0.1.x.
+## Languages and ecosystems
+
+Local CI Runner detects a project, works out which checks it can really run, and runs
+them with the project's own tools. It does not interpret CI YAML and it does not
+guess: a check that the project is not set up for is reported, never assumed.
+
+| Ecosystem | `project.type` values | Checks (step ids) |
+|---|---|---|
+| JavaScript / Node.js, TypeScript, React, Vue, Angular | `node`, `javascript`, `typescript`, `react`, `vue`, `angular` | `install`, `typecheck`, `test`, `coverage`, `lint`, `format`, `build`, `security` |
+| .NET / C# | `dotnet`, `csharp` | `restore`, `build`, `test`, `format` |
+| Python | `python` | `install` (explicit only), `test`, `lint`, `format`, `typecheck` |
+| Java | `maven`, `gradle`, `java` | `compile`, `test`, `verify`, `build` |
+| PHP | `php`, `composer` | `install`, `test`, `analyse`, `format` |
+| Go | `go` | `format`, `vet`, `test`, `build` |
+| Rust | `rust`, `cargo` | `check`, `test`, `build`, `format`, `lint` |
+
+`type` is matched case-insensitively. JavaScript, TypeScript, React, Vue and Angular are
+**one** ecosystem (Node.js) with different profiles: detecting a framework never removes
+a check, and no framework is assumed to have a particular test runner or script.
+
+### What each check runs
+
+Every command is an executable plus an argument list. No shell is involved.
+
+**Node.js family** (package manager from the lockfile: npm, pnpm, Yarn classic/Berry, Bun)
+
+| Step | Command | Needs |
+|---|---|---|
+| `install` | `npm ci` / `pnpm install --frozen-lockfile` / `yarn install --frozen-lockfile` (Berry: `--immutable`) / `bun install --frozen-lockfile` | a lockfile (otherwise BLOCKED: it would create one) |
+| `typecheck`, `test`, `lint`, `build` | `<manager> run <script>` | the script in `package.json`. An explicit script **always** wins. |
+| `coverage` | `<manager> run coverage`, else `<manager> run test --coverage` (npm needs `--` before the flag, and gets it) | a `coverage` script, or a `test` script plus a known coverage provider (`nyc`, `c8`, `jest`, `karma-coverage`, `@vitest/coverage-*`) |
+| `format` | `<manager> run format:check` | a `format:check` script. A plain `format` script is never run: it may rewrite files. |
+| `security` | `npm audit --json` / `pnpm audit --json` | npm or pnpm (Yarn and Bun: UNSUPPORTED). Contacts the registry. |
+
+Without a script, a tool is **inferred** only when it is declared in `package.json`
+*and* its configuration exists, and the report says so:
+
+| Step | Inferred command | Evidence required |
+|---|---|---|
+| `typecheck` | `tsc --noEmit -p tsconfig.json` | `typescript` declared + a non-solution `tsconfig.json` |
+| `typecheck` (Vue) | `vue-tsc --noEmit` | `vue-tsc` declared + `tsconfig.json` |
+| `lint` | `eslint .` | `eslint` declared + an ESLint config |
+| `format` | `prettier --check .` | `prettier` declared + a Prettier config |
+| `test` | `vitest run` or `jest --ci` | exactly one of them declared + its config |
+| `build` | `ng build` | Angular only: `angular.json` + `@angular/cli` |
+
+Inferred tools run through `npx --no-install` / `pnpm exec` / `yarn exec` / `bun x
+--no-install`, so nothing is fetched from a registry. **Angular projects get no
+inferred fallbacks** beyond `ng build`; their commands are unchanged from earlier
+versions.
+
+**.NET** (`.sln`, `.slnx`, or one SDK-style `.csproj`/`.fsproj`/`.vbproj`)
+
+| Step | Command |
+|---|---|
+| `restore` | `dotnet restore ./<target>` (`--locked-mode` when a `packages.lock.json` exists) |
+| `build` | `dotnet build ./<target> --no-restore -c Release` |
+| `test` | `dotnet test ./<target> --no-restore -c Release` — only when a project references `Microsoft.NET.Test.Sdk` or sets `IsTestProject` |
+| `format` | `dotnet format ./<target> --verify-no-changes --no-restore` (SDK 6 or newer; `init` adds it only if an `.editorconfig` exists) |
+
+Several solutions, or several projects and no solution, in one directory are BLOCKED
+as ambiguous: point `project.path` at one. A `global.json` SDK version is required as a
+minimum. Telemetry and the first-run banner are switched off.
+
+**Python** — each tool needs evidence (its configuration, or a declared dependency;
+comments do not count) **and** must import in the chosen interpreter
+
+| Step | Command | Evidence |
+|---|---|---|
+| `test` | `python -m pytest` | `pytest.ini`, `[tool.pytest.ini_options]`, `[tool:pytest]`, `conftest.py`, or a declared dependency |
+| `lint` | `python -m ruff check .` | `ruff.toml`, `[tool.ruff]`, or a declared dependency |
+| `format` | `python -m ruff format --check .` | same as `lint` |
+| `typecheck` | `python -m mypy [<package>]` | mypy configuration or dependency, plus a `files` setting or exactly one package |
+| `install` | `<venv python> -m pip install -r requirements.txt`, `uv sync --locked`, or `poetry install --no-interaction --sync` | an existing `.venv`/`venv` with `requirements.txt`, or `uv.lock`/`poetry.lock` with that tool |
+
+The interpreter is the project's `.venv` or `venv`, else `python3`/`python` (`py -3` on
+Windows). Dependencies are **never** installed unless the pipeline lists `install`,
+and `install` is never generated by `init` and never goes into a global interpreter.
+`requires-python = ">=X.Y"` is enforced as a minimum.
+
+**Java** — Maven or Gradle, wrapper first (`mvnw`/`gradlew`, `.cmd`/`.bat` on Windows)
+
+| Step | Maven | Gradle |
+|---|---|---|
+| `compile` | `mvn -B compile` (plus a property that quiets download-progress logging) | `gradle --console=plain --no-daemon classes` |
+| `test` | `mvn -B test` | `gradle … test` |
+| `verify` | `mvn -B verify` | `gradle … check` |
+| `build` | `mvn -B package -DskipTests` | `gradle … assemble` |
+
+A JDK (`java`) is always required; a declared `release`/`java.version` of 9 or higher
+becomes a minimum JDK. `pom.xml` together with `build.gradle` is BLOCKED as ambiguous.
+A wrapper that is not executable or lacks its properties file is BLOCKED with the fix.
+Wrappers download their pinned distribution on first use.
+
+**PHP** (Composer)
+
+| Step | Command | Evidence |
+|---|---|---|
+| `install` | `composer install --no-interaction --no-progress` | `composer.lock` (otherwise UNSUPPORTED) |
+| `test` | `composer run-script test`, else `vendor/bin/phpunit --do-not-cache-result` | a `test` script, or `phpunit.xml(.dist)` + PHPUnit declared or installed |
+| `analyse` | `vendor/bin/phpstan analyse --no-progress` | `phpstan.neon(.dist)` + PHPStan declared or installed |
+| `format` | `vendor/bin/php-cs-fixer fix --dry-run --diff` or `vendor/bin/phpcs` | the tool's config + the tool declared or installed |
+
+`steps.<id>.script` in a PHP project means a composer script. `composer.json`
+`require.php` with a single lower bound is enforced as a minimum PHP.
+
+**Go** (`go.mod`, or `go.work` with its `use` directories)
+
+| Step | Command |
+|---|---|
+| `format` | `gofmt -l .` |
+| `vet` / `test` / `build` | `go vet ./...` / `go test ./...` / `go build ./...` |
+
+`gofmt -l` exits 0 even when files need formatting, so `format` is judged by its
+**output**: any listed file (outside `vendor/` and `testdata/`) is a FAIL, and the
+files are named. A non-zero exit is a FAIL whose message is gofmt's stderr. `gofmt -w`
+is never used. `GOTOOLCHAIN=local` is set so a missing Go version is reported, never
+downloaded, and the `go` line of `go.mod` is required as a minimum.
+
+**Rust** (`Cargo.toml`, `Cargo.lock`, workspaces)
+
+| Step | Command |
+|---|---|
+| `check` | `cargo check --all-targets` |
+| `test` | `cargo test` |
+| `build` | `cargo build --release` |
+| `format` | `cargo fmt --all -- --check` (needs rustfmt) |
+| `lint` | `cargo clippy --all-targets -- -D warnings` (needs clippy) |
+
+`--workspace` is added for a workspace, `--locked` whenever a `Cargo.lock` exists, and
+`--offline` with `settings.offline`. `RUSTUP_AUTO_INSTALL=0` keeps rustup from
+installing a toolchain. Without a `Cargo.lock`, cargo creates one and `doctor` says so.
+
+### How a project is detected
+
+Detection is read-only and deterministic. A manifest proves the ecosystem; it does not
+prove the optional tools are in use or installed.
+
+- **Strong evidence** identifies a project (`package.json`, a `.sln`/`.csproj`,
+  `pom.xml`/`build.gradle`, `pyproject.toml` with `[project]`/`[tool.poetry]`/
+  `[build-system]`, `setup.py`, `requirements*.txt`, `composer.json`, `go.mod`/`go.work`,
+  `Cargo.toml` with `[package]`/`[workspace]`). **Weak evidence** (a `tox.ini`, a
+  `pytest.ini`, a `pyproject.toml` with only tool tables) is reported as a candidate by
+  `init` and `doctor` and never selected on its own.
+- **Several ecosystems in one directory** are separate projects. **Ambiguity inside one
+  ecosystem** (two solutions, Maven plus Gradle) blocks that project with the reason.
+- `project.type` in `.local-ci.yml` always decides which adapter runs; detection only
+  confirms it. A project that is not what its type says is BLOCKED with the reason.
+- A check needs configuration or a declared dependency (otherwise it is unavailable and
+  `UNSUPPORTED`) **and** its tool must be present when you run (otherwise `BLOCKED`).
+
+### Dependency installation
+
+No install step is ever added unless it is safe and necessary, and none rewrites a
+manifest or lockfile.
+
+| Ecosystem | `init` adds an install step when | It never |
+|---|---|---|
+| Node.js | a lockfile exists and `node_modules` is not already populated | runs `npm install` without a lockfile (BLOCKED) |
+| .NET | always (`restore`) | |
+| PHP | `composer.lock` exists and `vendor/` is absent | installs without a lockfile |
+| Python | never | installs into a global interpreter |
+| Java, Go, Rust | has no install step; the build tool resolves what it needs | `go mod tidy`, `cargo update` |
+
+Checks that need installed dependencies are BLOCKED ("install dependencies first")
+unless an install step runs earlier in the same project's pipeline, in which case it is
+only a warning. `init` leaves such steps out and says why.
+
+### Monorepos and several languages
+
+A repository with several projects lists them under `projects`:
+
+```yaml
+version: 1
+projects:
+  - name: web
+    type: react
+    path: apps/web
+    pipeline: [install, typecheck, lint, test, build]
+  - name: api
+    type: dotnet
+    path: services/api
+    pipeline: [restore, build, test]
+  - name: ml
+    type: python
+    path: ml
+    pipeline: [test, lint]
+settings:
+  failFast: false
+```
+
+- Step ids are qualified in reports and logs: `web.build`, `api.test`. A step shows as
+  `web: Production Build`, and every report carries a per-project roll-up.
+- A single `project:` with a `path:` points at one project below the root. The original
+  `project:` + `pipeline:` form is unchanged and keeps bare step ids.
+- `project` and `projects` are mutually exclusive; project names are letters, digits,
+  `_` and `-`, and unique. Paths are relative to the configuration file, may not be
+  absolute or contain `..`, and must stay inside the repository after symlinks are
+  resolved.
+- `local-ci-runner run --project web --project api` runs only those projects; an unknown
+  name is an error.
+- One project being BLOCKED never stops another project from running. `failFast` is
+  pipeline-wide: after a failure, later steps that could have run are `SKIPPED`.
+
+`init` and `doctor` find projects with workspace metadata first and a bounded scan
+second. `package.json` `workspaces`, `pnpm-workspace.yaml`, `go.work`, Cargo
+`[workspace]`, solution files, Maven `<modules>` and Gradle `include` say which
+directories belong to a project that is already listed; those are reported as
+*covered*, not listed again. The scan looks three levels deep by default and skips
+`node_modules`, `.git`, `bin`, `obj`, `target`, `vendor`, `dist`, `build`, `.venv` and
+similar. **Nothing is dropped silently:** covered members, weak candidates, directories
+the depth limit did not reach, symbolic links (never followed), and workspace patterns
+this version cannot expand (only literal paths, `*` and a trailing `**` are supported)
+are all reported.
+
+```bash
+local-ci-runner init                          # one project: writes a minimal configuration
+local-ci-runner init --dry-run                # print it, write nothing
+local-ci-runner init --all                    # every detected project, as `projects:`
+local-ci-runner init --path apps/web --type react
+local-ci-runner init --scan-depth 5 --ignore legacy
+```
+
+`init` never overwrites an existing `.local-ci.yml` without `--force`; `--dry-run` is the
+safe way to see what it would write. With more than one project it refuses to guess and
+prints the exact command to choose each. It generates only checks that can run, and for
+Go, Rust, .NET, Python, Java and PHP it also leaves out steps whose tool is not installed
+on this machine, with the reason as a comment.
+
+`--type` is your statement about the project. For a different ecosystem it is checked
+against what is on disk (`--type python` where there is no Python project is an error).
+Within the JavaScript family (`node`, `typescript`, `react`, `vue`, `angular`) it is only
+a label: they all run the same Node.js checks, and `init --type react` is accepted for a
+package that does not depend on React. `init` without `--type` picks the label from the
+dependencies it finds. A step that no tool can run is never written, so if nothing
+runnable is found `init` writes nothing and lists each reason.
+
+### Custom commands (`run:`)
+
+When a check has no built-in form, give the exact command as an argument list:
+
+```yaml
+steps:
+  contract-test:
+    run: [node, scripts/contract-test.js, --strict]
+    cwd: tools            # optional, relative to the project directory
+    timeoutMs: 600000     # optional
+```
+
+- It is an argument list, never a shell string: nothing is split, quoted, expanded or
+  globbed, so `$(...)`, `&&`, `*` and `%PATH%` reach the program as plain text.
+- `run[0]` is either a bare program name (looked up on `PATH`, **absolute `PATH` entries
+  only** — the current directory is never searched) or a path inside the project. A
+  project path may not be absolute or contain `..`, and must still be inside the project
+  after symlinks are resolved. `cwd` follows the same rules.
+- There is no way to set environment variables from the file.
+- A program that cannot be found, or a file that is not executable, is `BLOCKED` before
+  anything runs. PowerShell scripts (`.ps1`) and, on Windows, `.sh` files cannot be
+  started directly; run them through their interpreter (`[pwsh, -File, x.ps1]`,
+  `[bash, x.sh]`).
+- **Windows batch files (`.cmd`, `.bat`)** are started through `cmd.exe`, which
+  re-parses arguments. Any argument containing `% ! ^ & | < > " ( )` or a line break is
+  therefore rejected (the step is `BLOCKED`) rather than escaped. Call the underlying
+  `.exe` or a `node` script instead. This applies to `npm`, `pnpm` and `yarn` too when
+  you call them through `run:`.
+- Timeouts, cancellation, process-tree cleanup, output capture and secret masking are
+  the engine's, exactly as for every other step.
+
+### Statuses
+
+| Status | Meaning |
+|---|---|
+| `PASS` | The check ran and succeeded. |
+| `FAIL` | The check ran and failed (non-zero exit, or its output judged it a failure, as `gofmt -l` does). |
+| `TIMEOUT` | The check ran and exceeded its time limit (reported as `FAIL` with `timedOut: true`, classified separately). |
+| `BLOCKED` | A requirement that is known to be missing prevented it from running: a tool, a JDK, installed dependencies, a lockfile, a required environment variable, a project that is not what its type says. Nothing ran. |
+| `UNSUPPORTED` | local-ci-runner has no way to run this for this project: no such script, no configuration for the tool, an unknown step id. Nothing ran. |
+| `SKIPPED` | Intentionally not run (`failFast`, or cancellation before it started). |
+| `CANCELLED`, `ERROR` | Interrupted by the user; or an internal fault. |
+
+Only `PASS` is success and only an all-`PASS` run exits 0. `BLOCKED`, `UNSUPPORTED`,
+`SKIPPED`, `TIMEOUT`, `CANCELLED` and `ERROR` all exit non-zero, a pipeline made only of
+unsupported steps fails, and none is ever reported as `PASS`. A diagnostic that says a
+check *could not be performed* (`UNKNOWN`, for example when a sandbox forbids probing a
+tool) never blocks and never counts as a pass: the step runs and its own result decides.
+
+### Requirements and versions
+
+- Node.js 20.5.0 or later runs the CLI.
+- Every check needs its own tool on `PATH` (or the project's wrapper/virtual
+  environment): `dotnet`, `python`, `java` plus `mvn`/`gradle` or a wrapper, `php` and
+  `composer`, `go` and `gofmt`, `cargo` (with `rustfmt` and `clippy` for those steps).
+- Minimums are enforced only where the project declares them: `go.mod`, `global.json`,
+  `requires-python`, `composer.json` `require.php`, a Maven `release` of 9 or higher,
+  `engines.node`. `dotnet format` needs SDK 6 or newer.
+
+### Troubleshooting with `doctor`
+
+`local-ci-runner doctor` lists, for each project, what it can run and from what
+evidence, what it cannot and why, which tools are installed, and any project the
+configuration does not cover. `preflight` is the same gate `run` applies.
+
+| You see | Meaning and fix |
+|---|---|
+| `needs X, but X was not found on PATH` (`BLOCKED`) | Install it. Only that project's steps that need it are blocked. |
+| `… was found, but "X --version" did not report a version` | The tool is installed but broken (for example a `dotnet` that cannot load). Repair it. |
+| `needs pytest (python -m pytest), but it is not available` | Install pytest into the interpreter doctor names (the project's `.venv`, or the global one). |
+| `node_modules is missing … no earlier install step` | Install dependencies, or add `install` before the step. |
+| `requires java >= 21, but 17.0.12 is installed` | Switch JDK. Toolchains are never downloaded for you. |
+| `more than one solution` / `both Maven … and Gradle` | Point the project at one (`project.path`), or define the steps with `run:`. |
+| `mvnw is not executable` | `chmod +x mvnw`. |
+| `UNSUPPORTED` for a step | The project has no script or configuration for it. Add one, or remove the step. |
+| `Projects not in the configuration` | A project exists that `.local-ci.yml` never runs. Add it, or `init --all --dry-run`. |
+
+### Local versus CI
+
+This runs the checks on your machine, with your tools, before you push. It is not a CI
+replacement and does not promise CI parity. It does not provide service containers,
+secrets, matrix builds, caches, hosted-runner images or the network policy of your CI,
+and it does not read GitHub Actions or Azure DevOps YAML. `npm audit`/`pnpm audit`,
+Maven/Gradle wrappers and dependency restores use the network; `settings.offline` asks
+cargo (`--offline`), Gradle (`--offline`) and Maven (`-o`) not to, and is ignored by the
+other tools.
+
+### Platform notes
+
+- **Windows:** `.cmd`/`.bat` tools (`npm`, `pnpm`, `yarn`, `mvnw.cmd`, `gradlew.bat`,
+  `vendor\bin\*.bat`) are supported; see the batch-file rules under `run:`. A project path
+  containing `% ! ^ & | < > "` cannot use batch wrappers safely and is BLOCKED.
+  Symbolic links and junctions are never followed during discovery.
+- **macOS / Linux:** wrappers and `vendor/bin` tools must be executable.
+- **npm and `allow-scripts`:** `npm test`, `npx` and `npm run` export your whole npm
+  configuration to child processes as `npm_config_*` variables. With npm 11 and an
+  `allow-scripts` setting, a child `npm ci` then fails with `EALLOWSCRIPTS`. That is
+  npm's behaviour, and local-ci reports npm's message; unset the variable or run the
+  CLI directly.
+
+### Verification status
+
+What has actually been exercised, as opposed to what the code intends:
+
+| Ecosystem | Real tool exercised | Fake-tool / fixture tests |
+|---|---|---|
+| npm, pnpm, Bun | yes (Windows; scripts, `npm ci` from an empty lockfile) | yes |
+| Yarn | not on the machine this was built on | yes |
+| Python | yes: real interpreter and virtual environment, a missing `pytest` is `BLOCKED`. Real pytest/Ruff/mypy runs were not available. | yes |
+| Java | the JDK probe and a missing `mvn`/`gradle` are real; no Maven/Gradle build was run | yes |
+| .NET | a real but broken `dotnet` is `BLOCKED`; no working SDK was available | yes |
+| Go, Rust, PHP/Composer | not installed on the machine this was built on | yes |
+
+The `real-toolchains` job in `.github/workflows/verify-linux-process-tree.yml` installs
+all of them and runs `tests/real` with `LOCAL_CI_REAL_TOOLCHAINS=required`, where a
+missing tool is a failure instead of a skip. Until that job has passed, treat Go, Rust,
+PHP, .NET builds, Maven, Gradle and Yarn as implemented and unit/integration tested
+against fake tools, **not** as verified against the real tools. Linux and macOS paths
+are covered by the existing CI matrix and by tests that stub the platform; they were not
+run on the machine this was built on.
+
+### Migrating from 0.2.x
+
+- Existing single-project configurations work unchanged, and Angular produces the same
+  commands as before.
+- `project.type` still accepts any string. A type that is not in the table above behaves
+  exactly as it did: only `steps:` entries run, every other step is `UNSUPPORTED`, and
+  `validate`/`doctor` now print a warning saying so. Types that *are* in the table
+  (`node`, `react`, `python`, …) now get their built-in checks, so a step you did not
+  script, which used to be `UNSUPPORTED`, may now run (or be `BLOCKED`/`UNSUPPORTED` for
+  a concrete reason). `steps:` entries still take precedence over built-ins.
+- `init` refuses to write when several projects are found, instead of writing the Angular
+  default. Use `--all`, `--path`/`--type`, or `--dry-run`.
+- A tool that cannot be found now reads as missing (`BLOCKED`) on every platform; before,
+  on Linux and macOS some probes read as unverified.
 
 ## Phase 4.5 status
 
@@ -226,8 +597,10 @@ In an Angular project, `init` lists only the default steps (`install`, `typechec
 A step it cannot run yet, for example `lint` without a `"lint"` script or `install`
 without a lockfile, is written as a comment in `pipeline` with the reason, and is
 named in the output. Fix the cause and uncomment the line to add it; an unsupported
-step that is listed is reported as `UNSUPPORTED`, never as passing. Outside an Angular
-project `init` writes the full default pipeline.
+step that is listed is reported as `UNSUPPORTED`, never as passing. In any other
+supported project `init` does the same for that ecosystem (see [Monorepos and several
+languages](#monorepos-and-several-languages)); when nothing is detected it writes the
+default pipeline and says so.
 
 `init` also creates `.local-ci/.gitignore` (containing `*`), so stored reports stay
 out of version control. Your own `.gitignore` is never edited. `run` creates the same
@@ -300,6 +673,13 @@ starts only after the timed-out process tree has exited.
 A timeout fails the step. It is never reported as a pass, and it is never silently
 converted into a generic failure.
 
+### settings.offline
+
+Optional boolean. Asks tools that have an offline mode not to use the network: cargo
+(`--offline`), Gradle (`--offline`) and Maven (`-o`). Tools without one ignore it; it
+does not stop `npm ci`, `dotnet restore` or `composer install` from fetching packages
+if you list those steps.
+
 ### steps
 
 Run a project script as a pipeline step. This is how a non-Angular project (any
@@ -328,17 +708,18 @@ steps:
   (`pnpm run` / `yarn run`, following your lockfile) with no shell string built by
   local-ci-runner. Names may use letters, digits and `: . _ / -`, and must start with a
   letter or digit.
-- Nothing else is accepted: no `command`, `args`, `env` or `cwd`. An unknown key is an
-  error, as everywhere else in the file.
+- A `script` step accepts only `script` and `timeoutMs`. For any other command use
+  `run:` (see [Custom commands](#custom-commands-run)). An unknown key is an error, as
+  everywhere else in the file.
 - A `steps` entry replaces the built-in implementation of the same id. Angular steps
   you do not script behave exactly as before.
 - A script that is missing or empty in `package.json` reports `UNSUPPORTED` and exits
   non-zero; nothing is launched. `doctor` and `preflight` flag it first.
 - Exit codes, timeouts, cancellation, process-tree cleanup, secret masking, logs and
   the JSON/HTML reports are the same as for every other step, and `failFast` applies.
-- The scripts run with your project's trust: `.local-ci.yml` can only choose among
-  scripts that `package.json` already defines, so a configuration file cannot start an
-  arbitrary program.
+- A `script` step can only choose among scripts that `package.json` already defines. A
+  `run:` step starts the program you name, so treat `.local-ci.yml` like any other file
+  that can execute code on your machine, and review changes to it.
 
 ### Unknown keys
 
@@ -528,10 +909,17 @@ than guessed.
 
 ## Known limitations
 
-- Only Angular projects have a built-in adapter. Other projects run through the `steps`
-  section; steps they do not script report `UNSUPPORTED`.
-- `steps` runs `package.json` scripts only: there is no arbitrary `command`, no `args` and
-  no per-step working directory yet. Run the CLI from the package directory in a monorepo.
+- Not every ecosystem has been verified against its real tool; see [Verification
+  status](#verification-status). Checks that need a tool, a dependency or a configuration
+  the project does not have are `BLOCKED` or `UNSUPPORTED`, never skipped silently.
+- `doctor`, `preflight` and `run` check the Node.js version of the repository root for
+  the original single-project path, and `engines.node` per project for `projects`; they
+  do not read `.nvmrc` per project.
+- `settings.offline` is honoured by cargo, Gradle and Maven only.
+- Workspace member patterns are literal paths, `*` and a trailing `**`; anything else is
+  reported and not expanded.
+- `gofmt -l` is run on the module directories only; `go.work` entries outside the project
+  make the Go steps unavailable.
 - The range checker covers a subset of semver syntax; anything else is `UNKNOWN`.
 - Browser detection checks known install locations; a browser installed elsewhere is
   not found (and is reported as such, never as a pass).
@@ -823,6 +1211,7 @@ produces data and knows nothing about reports, HTML or the log layout.
 1. CLI foundation — done
 2. CI engine: timeouts, cancellation, logging — done
 3. Angular adapter — done
+3a. Node.js, .NET, Python, Java, PHP, Go and Rust adapters, monorepo `projects`, `run:` steps — implemented; real-toolchain verification pending for the tools listed under [Verification status](#verification-status)
 4. Console/JSON/HTML reporting expansion — done
 5. Preflight / doctor / environment readiness — done
 6. Azure DevOps YAML adapter/importer with explicit unsupported-task results — not started

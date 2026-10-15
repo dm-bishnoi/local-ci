@@ -1,7 +1,7 @@
 {
   "name": "@dm-bishnoi/local-ci-runner",
   "version": "0.2.0",
-  "description": "Run CI-style checks locally before pushing: an Angular adapter plus package.json script steps for any Node.js project, with preflight diagnostics and console, JSON, and HTML reports.",
+  "description": "Run CI-style checks locally before pushing: JavaScript/TypeScript (Angular, React, Vue), .NET, Python, Java, PHP, Go and Rust, with preflight diagnostics and console, JSON, and HTML reports.",
   "type": "module",
   "bin": {
     "local-ci-runner": "dist/cli/index.js"
@@ -36,7 +36,17 @@
     "angular",
     "test-automation",
     "process-management",
-    "reporting"
+    "reporting",
+    "typescript",
+    "react",
+    "vue",
+    "dotnet",
+    "python",
+    "java",
+    "php",
+    "go",
+    "rust",
+    "monorepo"
   ],
   "license": "MIT",
   "publishConfig": {

@@ -20,6 +20,9 @@ import { resolveStep, supportedStepIds } from '../adapters/angular/commands.js';
 import { requiredEnvironmentVariables } from '../config/schema.js';
 import { formatTimeout } from '../core/step-runner.js';
 import { collectProjectFacts, type ProjectFacts } from './facts.js';
+import { isRunStep } from '../config/schema.js';
+import { discoveryDiagnostics, ecosystemDiagnostics, runStepDiagnostic } from '../ecosystems/diagnostics.js';
+import { adapterFor } from '../ecosystems/registry.js';
 import { hasProjectScript } from './preflight.js';
 import type { Diagnostic } from './types.js';
 
@@ -352,7 +355,7 @@ function projectDiagnostics(facts: ProjectFacts): Diagnostic[] {
   return diagnostics;
 }
 
-function pipelineDiagnostics(facts: ProjectFacts): Diagnostic[] {
+async function pipelineDiagnostics(facts: ProjectFacts): Promise<Diagnostic[]> {
   const config = facts.config.config;
   if (!config) return [];
 
@@ -364,6 +367,18 @@ function pipelineDiagnostics(facts: ProjectFacts): Diagnostic[] {
   // the only question is whether that script exists.
   for (const stepId of configured) {
     const scripted = config.steps?.[stepId];
+    if (scripted !== undefined && isRunStep(scripted)) {
+      const problem = await runStepDiagnostic({
+        id: `step:${stepId}`,
+        label: stepId,
+        qid: stepId,
+        stepId,
+        definition: scripted,
+        projectDir: facts.cwd,
+      });
+      if (problem) diagnostics.push(problem);
+      continue;
+    }
     if (scripted === undefined || (facts.angular !== null && hasProjectScript(facts.angular, scripted.script))) continue;
     diagnostics.push({
       id: `step:${stepId}`,
@@ -536,21 +551,54 @@ export async function runDoctorChecks(cwd: string, options: DoctorOptions = {}):
     ? await noToolProbes()
     : await environmentDiagnostics((name, args) => probeTool(name, args));
 
-  return [
-    {
-      id: 'os',
-      label: 'Operating system',
-      severity: 'PASS',
-      category: 'environment',
-      detail: `${process.platform} ${process.arch}`,
-    },
+  const osDiagnostic: Diagnostic = {
+    id: 'os',
+    label: 'Operating system',
+    severity: 'PASS',
+    category: 'environment',
+    detail: `${process.platform} ${process.arch}`,
+  };
+
+  if (facts.plans !== null && facts.config.config !== null) {
+    return [
+      osDiagnostic,
+      ...toolDiagnostics,
+      {
+        id: 'config',
+        label: '.local-ci.yml',
+        severity: 'PASS',
+        category: 'configuration',
+        detail: `Valid configuration with ${facts.plans.length} project(s) and ${facts.config.config.pipeline.length} pipeline step(s).`,
+      },
+      ...(await ecosystemDiagnostics(facts.plans, facts.config.config, env, {
+        capabilitySummary: true,
+        ...(options.skipToolProbes !== undefined ? { skipToolProbes: options.skipToolProbes } : {}),
+      })),
+      ...(await discoveryDiagnostics(
+        facts.cwd,
+        facts.plans.map((plan) => ({ path: plan.project.path, ecosystem: plan.adapter?.id })),
+      )),
+    ];
+  }
+
+  const legacy = [
+    osDiagnostic,
     runtimeDiagnostic(facts),
     ...toolDiagnostics,
     await browserDiagnostic(facts, options.browsers),
     ...projectDiagnostics(facts),
-    ...pipelineDiagnostics(facts),
+    ...(await pipelineDiagnostics(facts)),
     ...environmentVariableDiagnostics(facts, env),
   ];
+
+  // The original single-project path also learns about projects it does not cover.
+  const configured = facts.config.config;
+  if (configured !== null) {
+    legacy.push(
+      ...(await discoveryDiagnostics(facts.cwd, [{ path: '.', ecosystem: adapterFor(configured.project.type)?.id }])),
+    );
+  }
+  return legacy;
 }
 
 /** Absolute path of a project file, for diagnostics that mention one. */

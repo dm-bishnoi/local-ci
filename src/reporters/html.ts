@@ -383,12 +383,36 @@ function renderFooter(report: RunReport): string {
   return `<footer>Environment: ${escapeHtml(parts.join(' · '))} · captured ${escapeHtml(formatTimestamp(environment.capturedAt))}</footer>`;
 }
 
+function renderProjects(report: RunReport): string {
+  if (!report.projects || report.projects.length === 0) return '';
+  const rows = report.projects
+    .map((project) => {
+      const { counts } = project;
+      const detail = `${counts.passed}/${counts.total} passed` +
+        (counts.failed > 0 ? `, ${counts.failed} failed` : '') +
+        (counts.timeout > 0 ? `, ${counts.timeout} timed out` : '') +
+        (counts.blocked > 0 ? `, ${counts.blocked} blocked` : '') +
+        (counts.unsupported > 0 ? `, ${counts.unsupported} unsupported` : '') +
+        (counts.skipped > 0 ? `, ${counts.skipped} skipped` : '');
+      return (
+        `<tr><td>${escapeHtml(project.name)}</td><td>${escapeHtml(project.type)}</td>` +
+        `<td>${escapeHtml(project.path)}</td><td>${pill(project.outcome)}</td><td>${escapeHtml(detail)}</td></tr>`
+      );
+    })
+    .join('');
+  return (
+    '<section><h2>Projects</h2><table><thead><tr><th>Project</th><th>Type</th><th>Path</th><th>Outcome</th>' +
+    `<th>Steps</th></tr></thead><tbody>${rows}</tbody></table></section>`
+  );
+}
+
 /** Renders the complete HTML document for a run. */
 export function renderHtmlReport(report: RunReport): string {
   const sections = [
     renderHeader(report),
     renderSummaryCards(report),
     renderCoverage(report),
+    renderProjects(report),
     renderStepTable(report.steps),
     renderFailedSteps(report.steps),
     renderTimedOutSteps(report.steps),

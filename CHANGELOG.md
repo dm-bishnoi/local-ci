@@ -2,6 +2,63 @@
 
 All notable changes to `@dm-bishnoi/local-ci-runner` are documented here.
 
+## Unreleased
+
+Multi-language support. See the README section "Languages and ecosystems" for the exact
+commands, requirements and detection rules, and "Verification status" for what has been
+exercised against real tools and what has only been tested with fake ones.
+
+### Added
+
+- **Ecosystems:** Node.js (JavaScript, TypeScript, React, Vue, Angular, with npm, pnpm,
+  Yarn and Bun), .NET, Python, Java (Maven and Gradle), PHP (Composer), Go and Rust.
+  Checks are detected from the project, never assumed: an explicit script always wins, a
+  tool is inferred only from a declared dependency *plus* its configuration, and a tool
+  that is configured but not installed is `BLOCKED`.
+- **`projects:`** in `.local-ci.yml` for monorepos and mixed-language repositories, with
+  project-qualified step ids (`web.build`), a per-project roll-up in the console, JSON
+  and HTML reports, and `run --project <name>`. One blocked project never stops another.
+  `project.path` points a single project at a subdirectory.
+- **`steps.<id>.run`:** a custom command as an argument list (never a shell string),
+  with executable and working-directory containment and a Windows `.cmd`/`.bat`
+  argument gate that rejects `cmd.exe` metacharacters instead of escaping them.
+- **`init`** detects projects (workspace metadata first, then a bounded scan that never
+  follows symlinks) and gains `--dry-run`, `--type`, `--path`, `--all`, `--scan-depth`
+  and `--ignore`. It refuses to guess between several projects, never overwrites
+  without `--force`, validates what it writes, leaves out steps whose tool is missing,
+  and keeps the Angular output byte-identical.
+- **`doctor`** lists what each project can run and why not, and warns about projects
+  the configuration does not cover, directories the scan depth did not reach, and
+  workspace patterns it cannot expand.
+- **`settings.offline`** (cargo, Gradle and Maven).
+- `tests/real` and a `real-toolchains` CI job that run the actual toolchains and fail,
+  rather than skip, when one is missing.
+
+### Behaviour changes
+
+- A `project.type` that is a recognised ecosystem (`node`, `react`, `python`, …) now gets
+  its built-in checks. A step you did not script, which used to be `UNSUPPORTED`, may now
+  run, or be `BLOCKED`/`UNSUPPORTED` for a concrete reason. `steps:` still wins.
+- A `project.type` that is not recognised keeps its 0.2.0 behaviour (only `steps:` run)
+  and now produces a warning in `validate`, `doctor` and `preflight`. No configuration
+  stops loading.
+- `init` with more than one project found refuses and lists them (use `--all`, `--path`
+  or `--dry-run`) instead of writing the Angular default.
+- A missing external tool is now reported as missing on Linux and macOS as well; before,
+  some probes read it as unverified. A tool that exists but cannot report a version is
+  reported as found-but-broken (for example a `dotnet` that cannot load).
+- A probe for a module or subcommand (`python -m pytest --version`) must exit 0; its
+  error text is no longer mined for a version. This fixed a real case where a missing
+  `pytest` looked installed because the interpreter's install path contained `3.14-64`.
+
+### Fixed
+
+- `steps: { x: { run: [] } }` could crash validation instead of reporting an error.
+- The Java `init` error no longer mentions the "build is part of verify" note when no step could be written.
+- A tool probe that timed out on a heavily loaded machine was reported as a missing tool and blocked
+  the step. It is now reported as "could not be checked" (a warning) and the step runs. The probe limit
+  is 20 s (it was 8 s); a tool that is not installed is still reported at once.
+
 ## 0.2.0
 
 ### Behaviour changes from 0.1.1

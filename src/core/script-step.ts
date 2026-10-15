@@ -3,7 +3,7 @@ import type { ProcessExecutor } from './process-runner.js';
 import type { PipelineStep } from './step-runner.js';
 
 /** Package managers that can run a package.json script as `<manager> run <script>`. */
-export type ScriptRunner = 'npm' | 'pnpm' | 'yarn';
+export type ScriptRunner = 'npm' | 'pnpm' | 'yarn' | 'bun';
 
 export interface ScriptStepOptions {
   id: string;
@@ -14,6 +14,8 @@ export interface ScriptStepOptions {
   script: string;
   /** Overrides the pipeline-wide timeout for this step. */
   timeoutMs?: number;
+  /** Project directory; defaults to the run's working directory. */
+  cwd?: string;
   /** Substitutes process execution. Used by tests. */
   exec?: ProcessExecutor;
 }
@@ -34,6 +36,7 @@ export function createScriptStep(options: ScriptStepOptions): PipelineStep {
     command: options.packageManager,
     args: ['run', options.script],
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+    ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
     ...(options.exec !== undefined ? { exec: options.exec } : {}),
   });
 }

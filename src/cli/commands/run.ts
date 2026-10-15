@@ -1,5 +1,6 @@
 import { CONFIG_FILE } from '../../config/loader.js';
-import { withEffectiveDefaults, type LocalCiConfig } from '../../config/schema.js';
+import { isRunStep, withEffectiveDefaults, type LocalCiConfig } from '../../config/schema.js';
+import { createRunStep } from '../../core/run-step.js';
 import {
   describeMissingAngular,
   registerAngularSteps,
@@ -7,6 +8,8 @@ import {
   type AngularDetection,
 } from '../../adapters/angular/index.js';
 import { createRunCancellation } from '../../core/cancellation.js';
+import type { ProcessExecutor } from '../../core/process-runner.js';
+import { qualifiedPipeline, buildProjectRegistry } from '../../ecosystems/plan.js';
 import { PipelineRunner, type PipelineRunResult } from '../../core/pipeline-runner.js';
 import { createMissingScriptStep, createScriptStep } from '../../core/script-step.js';
 import { StepRegistry } from '../../core/step-runner.js';
@@ -71,6 +74,10 @@ function registerScriptSteps(
   for (const [id, definition] of Object.entries(scripted)) {
     // Own properties only: an id such as "constructor" must not pick up Object members.
     const name = (Object.hasOwn(STEP_NAMES, id) ? STEP_NAMES[id] : undefined) ?? id;
+    if (isRunStep(definition)) {
+      registry.register(createRunStep({ id, name, definition, projectDir: facts.cwd }));
+      continue;
+    }
     registry.register(
       facts.angular !== null && hasProjectScript(facts.angular, definition.script)
         ? createScriptStep({
@@ -171,6 +178,7 @@ async function reportRun(
   result: PipelineRunResult,
   metadata: { projectName: string; projectType: string; framework: string | null; packageManager: string | null },
   gate: { environment: EnvironmentFingerprint; preflight: DiagnosticReport },
+  projects?: ReadonlyArray<{ name: string; type: string; path: string }>,
 ): Promise<number> {
   const coverage = await readRunCoverage(cwd, result.steps).catch(() => ({ percent: null, source: null }));
 
@@ -181,6 +189,7 @@ async function reportRun(
     coverageSource: coverage.source,
     environment: gate.environment,
     preflight: gate.preflight,
+    ...(projects && projects.length > 0 ? { projects } : {}),
   });
 
   printConsoleReport(built.report);
@@ -214,6 +223,86 @@ export interface RunCommandOptions {
   skipToolProbes?: boolean;
   /** Environment to read required variable names from. Defaults to process.env. */
   env?: NodeJS.ProcessEnv;
+  /** Run only these projects of a `projects:` configuration. */
+  projects?: readonly string[];
+  /** Substitutes process execution for adapter steps. Used by tests. */
+  exec?: ProcessExecutor;
+}
+
+interface PlannedRun {
+  cwd: string;
+  runId: string;
+  config: LocalCiConfig;
+  facts: ProjectFacts;
+  plans: NonNullable<ProjectFacts['plans']>;
+  preflightDiagnostics: readonly Diagnostic[];
+  projectName: string;
+  gate: { environment: EnvironmentFingerprint; preflight: DiagnosticReport };
+  options: RunCommandOptions;
+}
+
+/**
+ * Runs a configuration through the ecosystem adapters.
+ *
+ * Every step id is project-qualified, blocked projects are reported BLOCKED
+ * without touching the other projects, and each result carries the project it
+ * belongs to so reports can roll them up.
+ */
+async function runPlannedProjects(input: PlannedRun): Promise<number> {
+  const { cwd, runId, config, plans, preflightDiagnostics, gate, options } = input;
+  const { registry, stepProject } = buildProjectRegistry(plans, options.exec ? { exec: options.exec } : {});
+  const pipeline = plans.flatMap((plan) => qualifiedPipeline(plan));
+
+  const blockedSteps = new Map<string, string>();
+  for (const stepId of pipeline) {
+    const scoped = blockingDiagnostics(preflightDiagnostics, stepId);
+    if (scoped.length > 0) blockedSteps.set(stepId, describeBlockers(scoped));
+  }
+
+  const single = plans.length === 1 && plans[0]!.project.name === null ? plans[0]! : null;
+  const node = single?.scriptHost ?? null;
+  const metadata = {
+    projectName: input.projectName,
+    projectType: config.project.type,
+    framework: node?.frameworks[0] ?? null,
+    packageManager: node?.packageManager ?? null,
+  };
+  const projects = plans
+    .filter((plan) => plan.project.name !== null)
+    .map((plan) => ({ name: plan.project.name!, type: plan.project.type, path: plan.project.path }));
+
+  const progress = createProgressReporter();
+  const runner = new PipelineRunner(registry, {
+    onStepStart: (step) => progress.onStepStart(step),
+    onStepEnd: (result) => progress.onStepEnd(result),
+    blockedSteps,
+  });
+  const cancellation = createRunCancellation((reason) => {
+    console.error(`
+local-ci-runner: ${reason} Cancelling run...`);
+  });
+
+  let result: PipelineRunResult;
+  try {
+    result = await runner.run({
+      cwd,
+      config: { ...withEffectiveDefaults(config), pipeline },
+      runId,
+      signal: cancellation.signal,
+    });
+  } finally {
+    progress.stop();
+    cancellation.dispose();
+  }
+
+  const attributed: PipelineRunResult = {
+    ...result,
+    steps: result.steps.map((step) => {
+      const project = stepProject.get(step.id);
+      return project === undefined ? step : { ...step, project };
+    }),
+  };
+  return reportRun(cwd, attributed, metadata, gate, projects);
 }
 
 export async function runCommand(cwd: string, options: RunCommandOptions = {}): Promise<number> {
@@ -222,6 +311,23 @@ export async function runCommand(cwd: string, options: RunCommandOptions = {}): 
   // Facts are collected once and shared by preflight and the fingerprint, so
   // the gate and the report describe the same machine at the same moment.
   const facts = await collectProjectFacts(cwd);
+
+  // `--project` narrows a `projects:` configuration. Anything unknown is an
+  // error, not a silently empty run.
+  if (options.projects !== undefined && options.projects.length > 0) {
+    if (facts.plans === null) {
+      console.error('local-ci-runner: --project can only be used with a "projects:" configuration.');
+      return 1;
+    }
+    const known = facts.plans.map((plan) => plan.project.name ?? plan.project.type);
+    const unknown = options.projects.filter((name) => !known.includes(name));
+    if (unknown.length > 0) {
+      console.error(`local-ci-runner: unknown project ${unknown.map((n) => `"${n}"`).join(', ')}. Known projects: ${known.join(', ')}.`);
+      return 1;
+    }
+    facts.plans = facts.plans.filter((plan) => options.projects!.includes(plan.project.name ?? plan.project.type));
+  }
+
   const preflightDiagnostics = await runPreflightChecks(cwd, {
     facts,
     ...(options.browsers !== undefined ? { browsers: options.browsers } : {}),
@@ -258,6 +364,10 @@ export async function runCommand(cwd: string, options: RunCommandOptions = {}): 
       },
     ]);
     return reportRun(cwd, result, metadata, gate);
+  }
+
+  if (facts.plans !== null) {
+    return runPlannedProjects({ cwd, runId, config, facts, plans: facts.plans, preflightDiagnostics, projectName, gate, options });
   }
 
   const { registry, angular } = buildRegistry(facts, config);
