@@ -182,27 +182,35 @@ must also be installed when you run, otherwise the step is `BLOCKED`.
 What has been exercised against real tools, and what has only been tested against fake
 tools and fixtures. The real-tool evidence is the `Real toolchains` job in
 [`verify-linux-process-tree.yml`](.github/workflows/verify-linux-process-tree.yml), which
-passed on `ubuntu-latest` and `windows-latest` for the merge of multi-language support
-(17 passed, 3 skipped). That job runs `tests/real` and fails, rather than skips, when a
-tool is missing. The 3 skipped tests cover tools that are *absent or broken* (a `dotnet`
-that cannot run, and a Maven or Gradle project with no `mvn`/`gradle`). Those cases cannot
-occur on a runner where the tools are installed.
+runs on `ubuntu-latest`, `windows-latest` and `macos-latest`. It runs `tests/real` and fails,
+rather than skips, when a tool is missing; a skip outside a short list of expected ones
+(`scripts/check-skips.mjs`) also fails the job. The expected skips are the 3 tests for tools
+that are *absent or broken* (a `dotnet` that cannot run, and a Maven or Gradle project with no
+`mvn`/`gradle`), which cannot occur on a runner where the tools are installed. The same job
+then installs the **packed tarball** into an empty directory and runs `init`, `doctor` and
+`run` (and a deliberately broken `run`) for a Node, Python, Go, Rust, .NET and PHP project
+(`scripts/smoke-packed.mjs`).
 
-| Ecosystem | Real tool in CI (Ubuntu and Windows) | Tested only with fake tools / fixtures |
+| Ecosystem | Real tool in CI (Ubuntu, Windows, macOS) | Tested only with fake tools / fixtures |
 |---|---|---|
 | Node.js | `npm ci` from a lockfile and `npm run` scripts; script runs through pnpm, Yarn and Bun | inferred `tsc`/`vue-tsc`/`eslint`/`prettier`/`vitest`/`jest`, `coverage`, `security` (`npm audit`/`pnpm audit`), real Angular/React/Vue builds |
 | .NET (SDK 8) | `restore` and `build` of a console project | `test`, `format`, solution ambiguity |
-| Python (3.12) | virtual-environment selection; a missing tool is `BLOCKED`; pytest pass and fail; `ruff format --check` | `lint` (`ruff check`), `typecheck` (mypy), `install` (pip, uv, poetry) |
-| Java (JDK 17) | a Maven project is recognised by preflight; **no Maven build was run** | every Maven goal, all of Gradle, wrappers |
+| Python (3.12) | virtual-environment selection; a missing tool is `BLOCKED`; pytest pass and fail; `ruff check` and `ruff format --check` | `typecheck` (mypy), `install` (pip, uv, poetry) |
+| Java: Maven (JDK 17) | `compile`, `test`, `verify` and `build` of a JUnit 4 project; a failing test fails `test` and `verify`; code that does not compile fails `compile` | `mvnw` wrapper, `settings.offline` |
+| Java: Gradle (JDK 17) | the same four steps and failure cases | `gradlew` wrapper, `settings.offline`, Kotlin DSL, multi-module builds |
 | PHP (8.3) | `composer install` from a lockfile, then a composer `test` script | PHPUnit fallback, PHPStan, php-cs-fixer, phpcs |
 | Go (1.22) | `format`, `vet`, `test`, `build`; unformatted code is a `FAIL` and is not rewritten | `go.work` workspaces |
 | Rust (stable) | `check`, `test`, `build` with `--offline --locked`; `cargo fmt --check` | `lint` (clippy), workspaces |
 
-**Known gaps:** no real toolchain has been run on **macOS**; there, only the unit and
-integration suite runs (on Node 20, 22 and 24). Gradle, mypy, clippy,
-`dotnet test`, `dotnet format`, the PHP analysers and real front-end framework builds
-have not been run against the real tools. Treat them as implemented and tested against
-fakes, not as production-verified.
+The Maven and Gradle builds download their plugins and JUnit from Maven Central, so they run
+only where `LOCAL_CI_REAL_TOOLCHAINS` is set (the CI job, or a developer opting in). They use
+the Maven and Gradle that are installed on the CI runner image, not pinned versions.
+
+**Known gaps:** mypy, clippy, `dotnet test`, `dotnet format`, the PHP analysers and real
+front-end framework builds (Angular, React, Vue) have not been run against the real tools.
+`coverage` and `security` exist only for Node.js. Each real fixture is small, and each tool
+is tested at one version. Treat everything in the right-hand column as implemented and tested
+against fakes, not as production-verified.
 
 ### What each check runs
 
