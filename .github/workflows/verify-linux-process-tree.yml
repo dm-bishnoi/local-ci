@@ -134,19 +134,22 @@ jobs:
   real-toolchains:
     # Runs tests/real against the actual compilers and package managers. Nothing
     # is faked here, and a missing tool fails the job instead of skipping, so
-    # this job cannot pass by not testing. (The fixtures are offline; no
-    # dependency is downloaded.)
+    # this job cannot pass by not testing. The Maven and Gradle builds download
+    # their plugins and JUnit from Maven Central; the other fixtures are offline.
+    # Any skip outside the short expected list fails the job (scripts/check-skips.mjs),
+    # and the packed tarball is then installed and driven as a black box.
     name: Real toolchains (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
     env:
       LOCAL_CI_REAL_TOOLCHAINS: required
+      LOCAL_CI_SMOKE: required
 
     steps:
       - name: Checkout repository
@@ -212,4 +215,11 @@ jobs:
           dotnet --version; java -version; mvn --version; php --version; composer --version
 
       - name: Run real-toolchain tests
-        run: npx vitest run tests/real --reporter=verbose
+        run: npx vitest run tests/real --reporter=verbose --reporter=json --outputFile.json=real-toolchains-report.json
+
+      - name: Fail on unexpected skips
+        if: always()
+        run: node scripts/check-skips.mjs real-toolchains-report.json
+
+      - name: Packed-tarball smoke test (init, doctor, run per language)
+        run: node scripts/smoke-packed.mjs
