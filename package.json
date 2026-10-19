@@ -1,6 +1,6 @@
 {
   "name": "@dm-bishnoi/local-ci-runner",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Run CI-style checks locally before pushing: JavaScript/TypeScript (Angular, React, Vue), .NET, Python, Java, PHP, Go and Rust, with preflight diagnostics and console, JSON, and HTML reports.",
   "type": "module",
   "bin": {
