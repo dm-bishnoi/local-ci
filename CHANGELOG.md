@@ -2,7 +2,7 @@
 
 All notable changes to `@dm-bishnoi/local-ci-runner` are documented here.
 
-## Unreleased
+## 0.3.0
 
 Multi-language support. See the README section "Languages and ecosystems" for the exact
 commands, requirements and detection rules, and "Verification status" for what has been
@@ -31,8 +31,12 @@ exercised against real tools and what has only been tested with fake ones.
   the configuration does not cover, directories the scan depth did not reach, and
   workspace patterns it cannot expand.
 - **`settings.offline`** (cargo, Gradle and Maven).
-- `tests/real` and a `real-toolchains` CI job that run the actual toolchains and fail,
-  rather than skip, when one is missing.
+- `tests/real` and a `Real toolchains` CI job (Ubuntu, Windows and macOS) that run the actual
+  toolchains and fail, rather than skip, when one is missing. This includes real Maven and
+  Gradle builds (compile, test, verify, build, a failing JUnit test and a compile error).
+- CI fails on any skipped test outside a short list of expected ones, and installs the packed
+  tarball into an empty directory to run `init`, `doctor` and `run` for Node, Python, Go, Rust,
+  .NET and PHP projects (`scripts/smoke-packed.mjs`).
 
 ### Behaviour changes
 

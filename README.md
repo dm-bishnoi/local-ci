@@ -19,13 +19,10 @@ npx @dm-bishnoi/local-ci-runner run
 ```
 
 > [!IMPORTANT]
-> **Released vs. `main`.** The npm release **0.2.0** ships the Angular adapter,
-> `package.json` script steps (`steps.<id>.script`), `doctor`, `preflight` and the reports.
-> Everything else in this README is merged on `main` but **not yet released**:
-> multi-language support (.NET, Python, Java, PHP, Go, Rust, the generic Node.js family),
-> `projects:`, `project.path`, `steps.<id>.run`, `settings.offline`,
+> **Version 0.3.0** adds multi-language support (.NET, Python, Java, PHP, Go, Rust and the generic
+> Node.js family), `projects:`, `project.path`, `steps.<id>.run`, `settings.offline`,
 > `init --dry-run/--type/--path/--all/--scan-depth/--ignore` and `run --project`.
-> These are marked *(unreleased)* below. To use them now, [install from source](#install-from-source).
+> See [Verification status](#verification-status) for what has been run against real tools.
 
 ## Contents
 
@@ -72,29 +69,6 @@ npx @dm-bishnoi/local-ci-runner --help               # or run without installing
 The package is `@dm-bishnoi/local-ci-runner`, and the command it installs is
 `local-ci-runner`. It needs Node.js 20.5.0 or later.
 
-> [!NOTE]
-> **The npm package is 0.2.0.** It detects Angular projects only; any other project runs
-> just its `steps.<id>.script` entries, and in a non-Angular project `init` writes the
-> Angular default pipeline. Its `init` accepts only `--force`, and `run` takes no
-> options. Everything marked *(unreleased)* in this README, including
-> `init --dry-run/--type/--path/--all`, `run --project`, `projects:` and `run:`, needs a
-> [build from source](#install-from-source).
-
-#### Install from source
-
-To use the unreleased features on `main`, build a package from a clone and install it
-into your project:
-
-```bash
-git clone https://github.com/dm-bishnoi/local-ci.git
-cd local-ci
-npm ci
-npm pack                                   # builds dist/ and writes dm-bishnoi-local-ci-runner-<version>.tgz
-cd /path/to/your/project
-npm install --save-dev /path/to/local-ci/dm-bishnoi-local-ci-runner-<version>.tgz
-```
-
-You can also run the built CLI directly: `node /path/to/local-ci/dist/cli/index.js <command>`.
 
 ### First run
 
@@ -113,7 +87,7 @@ local-ci-runner report      # list stored runs; add a run id to show one
 
 If you installed the package into the project (`npm install --save-dev`), prefix each
 command with `npx`. For a Node.js project with `test`, `lint` and `build` scripts and a
-`package-lock.json`, `init` *(unreleased: generic Node.js detection)* writes:
+`package-lock.json`, `init` *(generic Node.js detection)* writes:
 
 ```yaml
 version: 1
@@ -155,8 +129,6 @@ stored reports stay out of version control. It never edits your own `.gitignore`
 never overwrites an existing `.local-ci.yml` unless you pass `--force`.
 
 ## Supported ecosystems
-
-*(Unreleased, except Angular and `package.json` script steps, which are in 0.2.0.)*
 
 | Ecosystem | `project.type` | Implemented checks (step ids) |
 |---|---|---|
@@ -393,16 +365,16 @@ settings:
 |---|---|
 | `version` | Always `1`. |
 | `project.type` | Which adapter runs (see [Supported ecosystems](#supported-ecosystems)). Any string is accepted; an unknown type runs only `steps:` entries. |
-| `project.path` *(unreleased)* | Project directory relative to the configuration file. |
+| `project.path` | Project directory relative to the configuration file. |
 | `pipeline` | Step ids, run in order. Required with `project`. |
-| `projects` *(unreleased)* | A list of projects, each with `name`, `type`, optional `path`, `pipeline` and optional `steps`. Cannot be combined with `project`, or with top-level `pipeline`/`steps`. |
+| `projects` | A list of projects, each with `name`, `type`, optional `path`, `pipeline` and optional `steps`. Cannot be combined with `project`, or with top-level `pipeline`/`steps`. |
 | `steps.<id>.script` | Run a `package.json` script (a Composer script in PHP projects) as step `<id>`. |
-| `steps.<id>.run` *(unreleased)* | Run a command given as an argument list. See [Custom commands](#custom-commands-run). |
-| `steps.<id>.cwd` *(unreleased)* | Working directory for a `run:` step, relative to the project. |
+| `steps.<id>.run` | Run a command given as an argument list. See [Custom commands](#custom-commands-run). |
+| `steps.<id>.cwd` | Working directory for a `run:` step, relative to the project. |
 | `steps.<id>.timeoutMs` | Per-step time limit that overrides `settings.timeoutMs`. |
 | `settings.failFast` | `false` (default): every step runs. `true`: after the first step that does not pass (`FAIL`, `UNSUPPORTED`, `BLOCKED`, …), later steps that could run are `SKIPPED`. |
 | `settings.timeoutMs` | Per-step limit in ms, at most 24 hours. **Default: 30 minutes.** A timed-out step's whole process tree is terminated and the step fails with `timedOut: true`. |
-| `settings.offline` *(unreleased)* | Asks cargo (`--offline`), Gradle (`--offline`) and Maven (`-o`) not to use the network. Other tools ignore it. |
+| `settings.offline` | Asks cargo (`--offline`), Gradle (`--offline`) and Maven (`-o`) not to use the network. Other tools ignore it. |
 | `environment.variables.required` | Variable names that must be set. Only presence is checked; values are never read or stored, and `.env` files are never loaded. A missing variable is `BLOCKED`. |
 
 Each key under `steps` must also appear in the pipeline, and a `steps` entry replaces
@@ -451,7 +423,7 @@ launched.
 
 ### Monorepos and multiple languages
 
-*(Unreleased.)* List each project with its own directory and pipeline. Paths are relative to the
+List each project with its own directory and pipeline. Paths are relative to the
 configuration file. They may not be absolute or contain `..`, and must stay inside the
 repository after symbolic links are resolved.
 
@@ -513,7 +485,7 @@ disk (see [`init`](#init)).
 
 ### Custom commands (`run:`)
 
-*(Unreleased.)* When a check has no built-in form, give the exact command as an argument list:
+When a check has no built-in form, give the exact command as an argument list:
 
 ```yaml
 version: 1
@@ -708,10 +680,10 @@ for tests) blocks only those steps.
 
 - **No shell.** Every step is an executable plus an argument vector. No command string
   is built from configuration values.
-- **Path containment** *(unreleased)*. `project.path`, `run[0]` paths and `cwd` must be
+- **Path containment**. `project.path`, `run[0]` paths and `cwd` must be
   relative, free of `..`, and inside the repository or project after symbolic links are
   resolved. Bare program names are looked up only in absolute `PATH` entries.
-- **Windows batch-file gate** *(unreleased)*. Arguments that `cmd.exe` would reinterpret
+- **Windows batch-file gate**. Arguments that `cmd.exe` would reinterpret
   are rejected for `.cmd`/`.bat` programs instead of being escaped. A project path that
   contains those characters cannot use batch wrappers and is `BLOCKED`.
 - **Not a sandbox.** Project scripts, build tools and `run:` commands execute with your
@@ -849,7 +821,7 @@ npm run dev -- doctor  # run the CLI from source with tsx
 - The Angular adapter and `package.json` script steps (released in 0.2.0).
 - `doctor`, `preflight`, the environment fingerprint, and console/JSON/HTML/log reports
   with secret masking.
-- *(Unreleased)* Node.js, .NET, Python, Java, PHP, Go and Rust adapters, `projects:`,
+- Node.js, .NET, Python, Java, PHP, Go and Rust adapters, `projects:`,
   `run:` steps, project discovery in `init`, and `settings.offline`.
 
 **Not implemented**
