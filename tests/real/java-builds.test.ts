@@ -10,7 +10,7 @@
 
 import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runCommand } from '../../src/cli/commands/run.js';
 import { NO_BROWSERS } from '../helpers/fixtures.js';
 import { withTempProject } from '../helpers/reports.js';
@@ -25,9 +25,20 @@ afterEach(() => vi.restoreAllMocks());
 
 const run = (cwd: string) => runCommand(cwd, { browsers: NO_BROWSERS });
 
+/**
+ * These builds download from Maven Central, so they run only where real toolchains are asked for
+ * (LOCAL_CI_REAL_TOOLCHAINS set: the dedicated CI job, or a developer opting in). In the general
+ * test matrix they would make `npm test` depend on the network.
+ */
+const optedIn = process.env['LOCAL_CI_REAL_TOOLCHAINS'] !== undefined;
+const describeBuild = (name: string, available: boolean, body: () => void): void => {
+  if (optedIn) describeReal(name, available, body);
+  else describe.skip(`real ${name} (SKIPPED: network build; set LOCAL_CI_REAL_TOOLCHAINS=1 to run)`, body);
+};
+
 const hasJava = await toolWorks('java', ['-version']);
-const mvnMaybe = hasJava && (await probeToolState('mvn', ['--version'], 60_000)) !== 'failed';
-const gradleMaybe = hasJava && (await probeToolState('gradle', ['--version'], 120_000)) !== 'failed';
+const mvnMaybe = optedIn && hasJava && (await probeToolState('mvn', ['--version'], 60_000)) !== 'failed';
+const gradleMaybe = optedIn && hasJava && (await probeToolState('gradle', ['--version'], 120_000)) !== 'failed';
 
 const CALC = 'package example;\n\npublic class Calc {\n  public static int add(int a, int b) { return a + b; }\n}\n';
 const GOOD_TEST =
@@ -63,7 +74,7 @@ const exists = (path: string) =>
     () => false,
   );
 
-describeReal('maven build', mvnMaybe, () => {
+describeBuild('maven build', mvnMaybe, () => {
   it('compile, test, verify and build all pass on a project with a passing JUnit test', async () => {
     await withTempProject(async (cwd) => {
       await writeTree(cwd, {
@@ -107,7 +118,7 @@ describeReal('maven build', mvnMaybe, () => {
   }, 900_000);
 });
 
-describeReal('gradle build', gradleMaybe, () => {
+describeBuild('gradle build', gradleMaybe, () => {
   it('compile, test, verify and build all pass on a project with a passing JUnit test', async () => {
     await withTempProject(async (cwd) => {
       await writeTree(cwd, {
